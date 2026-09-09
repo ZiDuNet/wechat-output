@@ -272,7 +272,8 @@ def main():
         t = datetime.fromtimestamp(ts).strftime("%H:%M")
         mt = r["local_type"]
         label = TYPE_MAP.get(mt, "富文本" if mt in RICH_TYPES
-                             else "复合" if mt > 100000 else f"类型{mt}")
+                             else "名片" if mt == 42 else
+                             "应用消息" if mt > 100000 else "微信消息")
         content = r["message_content"]
         text = None
         sender_u = None      # 内容前缀里提取到的发信人（真身）

@@ -1,0 +1,21 @@
+# 技能市场展示元数据（SkillHub 分发用，不影响技能加载；加载用 frontmatter 在 SKILL.md）
+name: wechat-group-export
+displayName:
+  zh: 微信群聊导出
+  en: WeChat Group Exporter
+summary:
+  zh: "从微信 Windows 4.x 本地加密数据库提取密钥、解密，并将指定群聊导出为 Markdown。零第三方依赖完成提取与解密，富文本解压仅需 zstandard；消息类型友好化显示，不留裸码。"
+  en: "Extract keys from WeChat Windows 4.x local encrypted databases, decrypt, and export a chosen group chat to Markdown. Zero third-party deps for extract+decrypt; zstandard only for rich-text inflation. Message types render as friendly labels, never raw codes."
+version: 1.0.3
+author: 简乐
+category: data-export
+tags:
+  - zh: 微信
+  - en: wechat
+  - zh: 聊天记录
+  - en: chat-history
+  - zh: 数据导出
+  - en: data-export
+icon: "💬"
+homepage: https://cnb.cool/fzz198479/wechat-group-export
+license: MIT
