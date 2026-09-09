@@ -63,6 +63,7 @@ wechat-group-export/
 │   ├── wx_export.py             # 一键流水线（推荐入口）
 │   ├── extract_keys_413.py      # 密钥提取 + XOR 混淆破解
 │   ├── export_group_md.py       # 解密库 → 按群导出 Markdown（含发信人身份双重校验）
+│   ├── cnb_push.sh              # 推本仓到 CNB（自动注入正确 token + 绕开失效代理）
 │   └── wcdb_key_tool_windows.py # 密钥校验/解密函数（源自 TANGandXue/wcdb-key-tool，MIT）
 └── LICENSE
 ```

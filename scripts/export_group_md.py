@@ -10,11 +10,17 @@ import hashlib
 import os
 import re
 import sqlite3
+import sys
 from datetime import datetime
+
+# 群名/昵称常含 emoji；stdout 重定向到管道/文件时 Python 退回 GBK，替换而非崩溃
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(errors="replace")
 
 ZSTD_MAGIC = b"\x28\xb5\x2f\xfd"
 TYPE_MAP = {1: "文本", 3: "图片", 34: "语音", 43: "视频", 47: "表情", 48: "位置",
-            49: "链接/文件", 51: "状态", 10000: "系统", 10002: "撤回", 266287972401: "拍一拍"}
+            49: "链接/文件", 51: "状态", 10000: "系统", 10002: "撤回", 266287972401: "拍一拍",
+            244813135921: "复合"}
 RICH_TYPES = set(range(49, 10000))  # 49 系复合类型按富文本处理
 
 # 群消息内容普遍带 "<id>:\n" 前缀。坑：这个 id **未必等于发送者 wxid** ——
@@ -23,27 +29,13 @@ RICH_TYPES = set(range(49, 10000))  # 49 系复合类型按富文本处理
 # 这样既覆盖业务号，又不会误伤"各位:\n"这类正常文本。
 # ⚠️ 这个前缀不是噪音，而是【发信人】！群消息正文格式 = "<发信人username>:\n<内容>"
 # （踩坑#20：早期版本把它当噪音剥掉，又用错误的 real_sender_id 映射补名字 -> 全员张冠李戴）
+# 两种形态直接采信；老式微信号形态（纯字母数字）单独拆出来，必须命中已知用户名才剥，
+# 否则 "Thanks:\n" 这类英文正文开头会被误当发信人吞掉（审计 E6）。
 ID_PREFIX_RE = re.compile(
     r"^(wxid_[A-Za-z0-9_\-]+"                   # wxid_xxx
     r"|[A-Za-z0-9_.\-]+@[A-Za-z0-9_.\-]+"       # 业务号/群号: xxx@openim / xxx@chatroom
-    r"|[A-Za-z][A-Za-z0-9_\-]{5,19}"            # 老式微信号: userabc / user123
     r"):\r?\n")
-
-
-def strip_id_prefix(s):
-    return ID_PREFIX_RE.sub("", s, count=1)
-
-
-def decode_content(c):
-    """message_content -> 文本（自动解 zstd）；失败返回 ''"""
-    if isinstance(c, bytes):
-        if c.startswith(ZSTD_MAGIC):
-            d = try_zstd(c)
-            return (d or "").replace("\r\n", "\n")
-        return c.decode("utf-8", "replace")
-    if c is None:
-        return ""
-    return str(c)
+LEGACY_PREFIX_RE = re.compile(r"^([A-Za-z][A-Za-z0-9_\-]{5,19}):\r?\n")  # 老式微信号，需互证
 
 
 def q(db, sql, args=()):
@@ -71,9 +63,21 @@ def try_zstd(data):
         return ""
 
 
+def split_prefix(text, known_users):
+    """剥「<发信人username>:\\n」前缀，返回 (发信人或None, 剩余正文)。
+    wxid_/xxx@yyy 两种形态直接采信（足够特异）；老式微信号形态必须命中已知用户名集合，
+    与本库 Name2Id/通讯录互证后才采信（审计 E6：防英文单词开头被误吞）。"""
+    m = ID_PREFIX_RE.match(text)
+    if m:
+        return m.group(1), text[m.end():]
+    m2 = LEGACY_PREFIX_RE.match(text)
+    if m2 and m2.group(1) in known_users:
+        return m2.group(1), text[m2.end():]
+    return None, text
+
+
 def rich_text_summary(xml_text):
     """从富文本 XML 提取可读摘要"""
-    import re
     m = re.search(r"<title>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</title>", xml_text, re.S)
     title = (m.group(1).strip() if m else "")
     m2 = re.search(r"<des>(?:<!\[CDATA\[)?(.*?)(?:\]\]>)?</des>", xml_text, re.S)
@@ -99,6 +103,8 @@ CREATE TABLE IF NOT EXISTS messages(
   room_id TEXT, ts INTEGER, sender TEXT, local_type INTEGER,
   is_system INTEGER, content TEXT);
 CREATE INDEX IF NOT EXISTS idx_msg ON messages(room_id, ts);""")
+    # 先把该群历史 is_current 全部清零再 upsert 当前名单：退群成员不会永远挂着 1（审计 E5）
+    conn.execute("UPDATE members SET is_current=0 WHERE room_id=?", (room_id,))
     conn.executemany(
         "INSERT INTO members VALUES(?,?,?,?) ON CONFLICT(room_id,username) "
         "DO UPDATE SET nickname=excluded.nickname, is_current=excluded.is_current",
@@ -120,26 +126,46 @@ CREATE INDEX IF NOT EXISTS idx_msg ON messages(room_id, ts);""")
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--dec", required=True, help="解密库目录(decrypted)")
-    ap.add_argument("--group", required=True, help="群名关键词(匹配 nick_name)")
+    ap.add_argument("--group", help="群名关键词(匹配 nick_name；与 --username 二选一)")
+    ap.add_argument("--username", help="群 username 精确定位(如 xxx@chatroom，上游已消歧时用)")
     ap.add_argument("--out", required=True, help="输出 Markdown 路径")
     ap.add_argument("--with-zstd", action="store_true", help="解压富文本(需 zstandard)")
     ap.add_argument("--sqlite", help="结构化输出 SQLite 路径（统计底座：群/成员/消息三张表）")
     args = ap.parse_args()
+    if not args.username and not args.group:
+        sys.exit("[x] 需要 --group 群名关键词，或 --username 精确群 ID")
 
     contact_db = find_file(args.dec, "contact.db")
     if not contact_db:
-        sys.exit("找不到 contact.db")
-    rows = q(contact_db, "SELECT username, nick_name, local_type FROM contact "
-                         "WHERE (nick_name LIKE ? OR remark LIKE ?)", (f"%{args.group}%", f"%{args.group}%"))
-    if not rows:
-        sys.exit(f"未找到昵称含「{args.group}」的群")
-    for r in rows:
-        print(f"候选: {r['nick_name']}  username={r['username']}  type={r['local_type']}")
-    # 精确匹配优先：避免「A群」被「A群2」抢占(LIKE 首条命中不一定是想要的)
-    exact = [r for r in rows
-             if (r["nick_name"] or "") == args.group or (r["remark"] or "") == args.group]
-    g = exact[0] if len(exact) == 1 else rows[0]
-    uname, gname = g["username"], g["nick_name"]
+        sys.exit("[x] 找不到 contact.db")
+
+    if args.username:            # 精确路径：上游 wx_export 已消歧，直接按 username 定位
+        rows = q(contact_db, "SELECT username, nick_name, remark FROM contact WHERE username=?",
+                 (args.username,))
+        if not rows:
+            sys.exit(f"[x] contact.db 中不存在 username={args.username}")
+        g = rows[0]
+    else:                        # 手动路径：与 wx_export.resolve_group 同语义 —— 不瞎猜
+        kw = args.group.strip()
+        pat = "%" + kw.replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        # 只在 @chatroom 里找群：关键词撞上好友昵称时，绝不能把私聊当群导出（审计 E2）
+        rows = q(contact_db,
+                 "SELECT username, nick_name, remark FROM contact "
+                 "WHERE username LIKE '%@chatroom' AND "
+                 "(nick_name LIKE ? ESCAPE '\\' OR remark LIKE ? ESCAPE '\\')", (pat, pat))
+        if not rows:
+            sys.exit(f"[x] 未找到昵称/备注含「{args.group}」的群（只在 @chatroom 群里查找）")
+        exact = [r for r in rows
+                 if (r["nick_name"] or "") == kw or (r["remark"] or "") == kw]
+        if len(exact) == 1:
+            g = exact[0]
+        elif len(rows) == 1:
+            g = rows[0]
+        else:
+            for r in rows:
+                print(f"候选: {r['nick_name']}  username={r['username']}")
+            sys.exit(f"[x] 「{args.group}」命中 {len(rows)} 个群，请用完整群名或改用 --username，不瞎猜")
+    uname, gname = g["username"], (g["nick_name"] or g["username"])
     md5 = hashlib.md5(uname.encode()).hexdigest()
     print(f"目标: {gname}  md5={md5}")
 
@@ -183,6 +209,7 @@ def main():
     # 合并多个库的行：不同库的 sort_seq 不具可比性，统一按 create_time 排序；
     # 跨库可能重复存同一条消息 -> 按 (时间, 发送者, 内容长度) 去重
     all_rows, seen = [], set()
+    all_n2i_users = set()   # 全部库的 Name2Id 用户名并集（老式微信号前缀互证用，审计 E6）
     for db, t, _c in found:
         # 只与"前面的库"比对去重：同一库内的行本身就是不同记录，绝不能互删
         # （早期版本按 (时间,发送者,内容长度) 全库去重，会误删同秒同人的不同消息，实测少 1~4 条）
@@ -191,6 +218,7 @@ def main():
             n2i = {r["rid"]: r["user_name"] for r in q(db, "SELECT rowid rid, user_name FROM Name2Id")}
         except Exception:
             n2i = {}
+        all_n2i_users.update(n2i.values())
         cur = set()
         for r in q(db, f"SELECT * FROM {t}"):
             c = r["message_content"]
@@ -233,6 +261,7 @@ def main():
     cur_day = None
     senders = set()      # 供成员核验/成员表用
     msgs = []            # 结构化输出缓冲: (room_id, ts, sender, local_type, is_system, content)
+    known_users = set(nick) | all_n2i_users   # 老式微信号前缀互证集合（审计 E6）
     for r in all_rows:
         stats["total"] += 1
         ts = r["create_time"]
@@ -242,7 +271,8 @@ def main():
             lines.append(f"\n## {day}\n")
         t = datetime.fromtimestamp(ts).strftime("%H:%M")
         mt = r["local_type"]
-        label = TYPE_MAP.get(mt, "富文本" if mt in RICH_TYPES else f"类型{mt}")
+        label = TYPE_MAP.get(mt, "富文本" if mt in RICH_TYPES
+                             else "复合" if mt > 100000 else f"类型{mt}")
         content = r["message_content"]
         text = None
         sender_u = None      # 内容前缀里提取到的发信人（真身）
@@ -256,16 +286,8 @@ def main():
                     stats["zstd_ok"] += 1
                     dec = dec.replace("\r\n", "\n")   # 内容里是 \r\n，不归一化的话前缀/XML 判定全失效
                     # 前缀 = 发信人（踩坑#20）：先取出再剥掉；不剥的话富文本会整坨 XML 吐出来
-                    m = ID_PREFIX_RE.match(dec)
-                    if m:
-                        sender_u = m.group(1)
-                        dec = dec[m.end():]
-                    body = dec
-                    if body.lstrip().startswith("<"):
-                        title, des = rich_text_summary(body)
-                        text = f"[{label}] " + " | ".join(x for x in (title, des) if x)
-                    else:
-                        text = dec
+                    sender_u, dec = split_prefix(dec, known_users)
+                    text = dec
             else:
                 stats["zstd_skip"] += 1
                 text = f"[{label}·压缩未解]"
@@ -280,12 +302,13 @@ def main():
         # 归一化 + 前缀提取（明文分支在这里取到发信人）
         if isinstance(text, str):
             text = text.replace("\r\n", "\n")
-            m = ID_PREFIX_RE.match(text)
-            if m:
-                sender_u = sender_u or m.group(1)
-                text = text[m.end():]
-            else:
-                text = strip_id_prefix(text)
+            p, text = split_prefix(text, known_users)
+            sender_u = sender_u or p
+            # 明文存储的富文本 XML 同样走摘要（审计 E8：不依赖"富文本必被压缩"的实测规律）
+            if text.lstrip().startswith("<"):
+                title, des = rich_text_summary(text)
+                if title or des:
+                    text = f"[{label}] " + " | ".join(x for x in (title, des) if x)
         text = (text or "").replace("\r", "").strip()
         # 发信人：内容前缀（真身）> 本库 Name2Id。绝不用全局 name2id 兜底（小号雷区，踩坑#20）
         u = sender_u or r["local_u"]
@@ -315,7 +338,10 @@ def main():
     if args.sqlite:
         sqlite_out(args.sqlite, uname, gname, member_names, senders, nick, msgs)
 
+    n_sys = sum(1 for m in msgs if m[4])
     print(f"\n统计: {stats}")
+    print(f"消息口径对账: 本次共 {len(msgs)} 条 = 有效 {len(msgs) - n_sys} 条"
+          f"（统计底座 msg_count / 群刊「有效消息」同源采用此数）+ 系统/撤回/拍一拍 {n_sys} 条")
     print(f"输出: {args.out}")
 
 

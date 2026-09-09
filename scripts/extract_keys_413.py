@@ -155,7 +155,13 @@ def filter_blobs(blobs):
     groups = collections.Counter(len(b) for b in blobs)
     if len(groups) > 1:
         blobs = mode_group(blobs, len)
-    return mode_group(blobs, lambda b: b[:2])
+    n_all = len(blobs)
+    blobs = mode_group(blobs, lambda b: b[:2])
+    # 众数占比护栏：真 blob 应占绝对多数；占比过低说明噪声反超，投票制会整体选错
+    if n_all and len(blobs) / n_all < 0.5:
+        print(f"[!] 警告: magic 众数仅覆盖 {len(blobs)}/{n_all} 个 blob（<50%），"
+              f"本批 dump 可能噪声过多，密钥提取成功率存疑", flush=True)
+    return blobs
 
 
 def solve_ks(blobs, hex_start, hex_end, pinned):
@@ -214,6 +220,8 @@ def main():
         cands = [ks[i][:3] for i in ambig_idx]
         combos = list(itertools.product(*cands)) if cands else [()]
         if len(combos) > 20000:
+            print(f"[!] 警告: 组合数超上限，截断为前 20000（正确组合可能被截掉，"
+                  f"可清空 dump 目录后重跑提升 blob 质量）", flush=True)
             combos = combos[:20000]
         print(f"[{name}] 模糊位置 {ambig_idx}, 组合数 {len(combos)}", flush=True)
         for combo in combos:
