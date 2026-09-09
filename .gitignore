@@ -1,0 +1,11 @@
+# 敏感运行时产物（含解密库 + 数据库密钥 + 明文聊天记录），绝不入库
+.wxcache/
+config_dump/
+decrypted/
+all_keys.json
+*.db
+
+# Python
+__pycache__/
+*.pyc
+.venv/
