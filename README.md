@@ -111,3 +111,39 @@ wechat-group-export/
 ## License
 
 MIT。内嵌 `scripts/wcdb_key_tool_windows.py` 源自 [TANGandXue/wcdb-key-tool](https://github.com/TANGandXue/wcdb-key-tool)（MIT），版权归原作者，详见 `LICENSE` 的 Third-party notices。
+## 借鉴的技术与仓库（致谢）
+
+本项目在开发过程中参考了以下开源项目与思路。**所有借鉴均为"看实现、融思路"，最终代码按
+本仓库自身需求重写**；仅 `scripts/wcdb_key_tool_windows.py` 直接内嵌第三方源码（MIT，见 License 一节）。
+
+| 项目 | 借鉴了什么 | 用途 | 许可/状态 |
+|---|---|---|---|
+| [sjzar/chatlog](https://github.com/sjzar/chatlog)（含 [imldy/chatlog](https://github.com/imldy/chatlog) 等 fork） | **语音导出的核心突破**：微信 4.x 语音数据不在文件系统，而在 `message/media_*.db` 的 `VoiceInfo` 表（`voice_data` BLOB，按 `svr_id` 关联消息 `server_id`）；`pkg/util/silk` 的 SILK→MP3 转码思路 | 语音提取与解码链路（`export_voice.py`） | 原仓库已被微信官方函件要求移除（2025-10，仓库仅剩说明）；fork 留存 |
+| [sjzar/go-silk](https://github.com/sjzar/go-silk) | 完整 SILK SDK C 源码（csilk 目录，Skype 官方开源，BSD）与 `SKP_Silk_SDK_Decode` 调用签名、微信帧格式（`0x02#!SILK_V3` 头 + 2B 帧长前缀） | 理解解码协议；pysilk 之外的备选实现 | BSD（Skype Limited 版权声明见源码头） |
+| [foyoux/pilk](https://github.com/foyoux/pilk)（silk-python / pysilk 同族） | SILK 编解码的 Python 库方案：`pilk.decode` 直接吃微信 SILK（含帧长前缀），编码方向见 [foyoux/weixin-wxposed-silk-voice](https://github.com/foyoux/weixin-wxposed-silk-voice) | **实际选用的解码库**（`pip install silk-python`） | GPLv3（pilk）/ 各自许可；本工具仅通过 pip 调用，不内嵌 |
+| [kn007/silk-v3-decoder](https://github.com/kn007/silk-v3-decoder) | 经典 SILK v3 解码器（Skype 官方 SDK 编译），实测可解本工具导出的微信语音（165 帧/153KB PCM 全对） | 备选解码方案（独立 exe）；因用户偏好"纯 Python 原生"最终未采用 | 实测可用；引入需自行承担第三方二进制信任 |
+| [WeChatDataAnalysis](https://github.com/WeChatDataAnalysis/WeChatDataAnalysis) | ① 图片密钥派生：`md5(code+wxid)[:16]` + `xor=code&0xFF`，code 从进程内存扫描；② V2 dat 结构（15B 头：magic + aes_size + xor_size + pad）；③ WXGF 用 `VoipEngine.dll` 的 `wxam_dec_wxam2pic_5` 转码；④ SILK→WAV 转码 | 图片解密（`media_common.py` / `extract_image_key.py`）、WXGF 转码 | 其语音下载依赖第三方付费服务 wxcdn.c3o.re（配额/兑换码）——**本仓库评估后未采用**，改为本地 VoiceInfo 直取 |
+| [0xlane/wechat-dump-rs](https://github.com/0xlane/wechat-dump-rs) | 密钥从运行中微信进程提取、数据库自动解密的 Rust 工具；`media_*.db` 存语音的提示 | 总体思路印证 | 存续 |
+| [TANGandXue/wcdb-key-tool](https://github.com/TANGandXue/wcdb-key-tool) | 数据库密钥校验/解密函数（`verify_enc_key` / 库文件 HMAC 校验等） | `scripts/wcdb_key_tool_windows.py`（内嵌） | MIT（已在 LICENSE 登记） |
+| [wxcdn.c3o.re](https://wxcdn.c3o.re)（第三方 CDN Worker） | 语音/媒体代下载服务契约（token/配额/redeem/download 端点），见 WeChatDataAnalysis `cdn_image_service.py` | **评估后未采用**：需上传微信 `global_config` 鉴权、配额付费、稳定性/隐私不可控 | 第三方服务，非开源 |
+| wechat-cli / wechat-smart-organizer（本机 skill） | 命令式导出思路 | **评估后未采用**：PyPI/GitHub 无对应包，命令全为空中楼阁（SKILL.md 踩坑#1/#16） | — |
+
+### 关键借鉴路径（源码位置，便于追溯）
+
+本仓库开发期将参考仓库克隆在 `wechat-cli-src/` 下对照研读（不入库，仅开发期参考）：
+
+```
+wechat-cli-src/
+├── WeChatDataAnalysis/src/wechat_decrypt_tool/
+│   ├── image_key_resolver.py      # derive_image_keys / scan_v2_templates（图片密钥派生）
+│   ├── image_key_memory_scan.py   # 扫内存找 code
+│   ├── media_helpers.py           # _decrypt_wechat_dat_v4 / _wxgf_to_image / _convert_silk_to_wav
+│   └── cdn_image_service.py       # wxcdn 契约（评估后未采用）
+├── chatlog-fork/internal/wechatdb/datasource/v4/datasource.go
+│                                   # GetVoice：SELECT voice_data FROM VoiceInfo WHERE svr_id=?
+├── go-silk/csilk/                  # 完整 SILK SDK C 源码 + Decoder_Api.c（调用签名）
+└── silk2mp3/                       # kn007 预编译（备选验证，最终未采用）
+```
+
+> **方法论**：微信生态的开源导出工具多次被厂商以 DMCA/函件要求下架（chatlog、WeFlow 均已移除代码），
+> 因此本项目坚持"看实现、融思路、不复制代码"，核心逻辑全部自研，且**不依赖任何第三方付费服务**。
