@@ -2,9 +2,14 @@
 
 从微信 4.x 的本地加密数据库提取密钥、解密，把指定群聊/私聊导出为 Markdown，并把图片/视频等媒体解密导出的工具链。**数据库密钥与图片密钥均从进程内存自动提取**；**零第三方加密依赖即可完成提取+解密**（AES 走系统库：Windows `bcrypt.dll` / macOS CommonCrypto / Linux OpenSSL）；解压富文本消息需 zstandard（1.8MB）。
 
+> ⚠️ **平台支持状态（务必先读）**：本工具链**仅在 Windows 上经过真机实测**。
+> **macOS / Linux 为 v2.4 代码级实现，尚未在任何 macOS / Linux 真机测试**——
+> 相关脚本（`extract_keys_macos.py` / `extract_keys_linux.py` / `aes_backend.py` 的 darwin/linux 后端 /
+> `media_common.py` 的 darwin/linux 分支）只做了语法与逻辑走查，未经真机验证。
+> 在 macOS / Linux 上使用前，请先在一台真机验证密钥提取与解密全流程；因未真机测试导致的问题不在已实测范围内。
+>
 > 实测环境：**Windows + 微信 4.1.13.63，非管理员权限**（全流程真跑过）。
-> **macOS / Linux 已落地为跨平台代码**（按 `sys.platform` 自动分支），但本机是 Windows，
-> mac/linux 代码只做了语法/import/逻辑走查，**未在 mac/linux 真机跑过**——详见文末「跨平台」与致谢。
+> 跨平台代码按 `sys.platform` 自动分支，详见文末「跨平台」与致谢。
 
 ## 特性
 
