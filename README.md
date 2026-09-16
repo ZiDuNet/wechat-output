@@ -18,6 +18,13 @@
 - **语音可回溯到聊天时间线**：WAV 文件名自带秒级消息时间；每会话输出 `语音时间线.csv`；全局 `voice_map.json` 供 Markdown 导出 `--voice-map`，聊天记录里 `[语音] 🎤 <wav路径>` 直接对应当天该时刻的语音
 - **语音消息显示时长**（`--with-zstd`）：消息正文是 zstd 压缩的 `<voicemsg>` 元数据（时长/格式/CDN 引用），解开后显示 `[语音 15s]`（毫秒精确）或 `[语音 ~4s]`（旧版字节估算），XML 不泄漏进 Markdown
 - **图片密钥全自动提取**：扫微信进程内存中的登录态整数 code（常驻，无需用户操作）→ 派生 AES 密钥 → 模板验证 → 保存复用。实测 #[MOTHER] 私聊 1758 张图片 10 秒内全部解密成功
+- **朋友圈导出（v2.3）**：解析 `sns/sns.db` 的 SnsTimeLine XML，导出正文/图片/视频/地点/分享链接，自动关联评论与点赞（本机实测 395 条）
+- **收藏导出（v2.3）**：解析 `favorite/favorite.db`，按 11 种 type 分组渲染（文字/图片/语音/视频/链接/位置/文件/合并转发/笔记/小程序/视频号）
+- **服务号文章导出（v2.3）**：独立库 `biz_message_0.db`，zstd 解压后按公众号分组导出标题/摘要/原文链接（实测 414 个号 / 20384 篇）
+- **转账/红包/小程序导出（v2.3）**：扫 49 类 appmsg，按子类型分流——转账解析金额/备注/收付款状态，红包导出祝福语+发送人（金额微信本地不存），小程序提取 appid/标题
+- **聊天搜索（v2.3）**：直接复用微信自带 FTS5 索引（约 120 万行），关键词/会话/时间过滤，0.2s 级
+- **增量导出（v2.3）**：状态文件记录上次导出位置，只追加新增消息，重复运行不重复导出
+- **跨平台研究（v2.3）**：见 `docs/CROSS_PLATFORM.md`（macOS/Linux 可行性表）与 `docs/WCDB_KEY_TOOL_RESEARCH.md`
 
 ## 环境要求
 
@@ -70,6 +77,14 @@ python wx_export.py --list-contacts   # 列出全部联系人（确认备注名�
 python wx_export.py --purge           # 删除缓存（密钥+解密库，敏感）
 python wx_export.py --group "群名" --cache "D:/tools/.wxcache" --outdir "D:/导出"  # 自定义缓存
 python wx_export.py --group "群名" --db-dir "D:/微信数据/.../db_storage"            # 手动指定数据目录
+
+# 7. v2.3 新模块（都基于已解密库，直接复用 ~/.wxcache/decrypted，无需再提密钥）
+python export_sns.py --dec "C:/Users/xxx/.wxcache/decrypted" --out "D:/导出/朋友圈.md"
+python export_favorite.py --dec "C:/Users/xxx/.wxcache/decrypted" --out "D:/导出/收藏.md"
+python export_biz.py --dec "C:/Users/xxx/.wxcache/decrypted" --out "D:/导出/公众号文章.md"
+python export_transfer.py --dec "C:/Users/xxx/.wxcache/decrypted" --out "D:/导出/转账红包小程序.md"
+python search_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --keyword "关键词"
+python export_incremental.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "群名" --out "D:/导出/群名.md"
 ```
 
 脚本遵循**程序与数据分离**：不写死任何机器路径。首次运行约 30s~8min（扫描内存提密钥），之后秒级。
@@ -129,7 +144,7 @@ MIT。内嵌 `scripts/wcdb_key_tool_windows.py` 源自 [TANGandXue/wcdb-key-tool
 | [kn007/silk-v3-decoder](https://github.com/kn007/silk-v3-decoder) | 经典 SILK v3 解码器（Skype 官方 SDK 编译），实测可解本工具导出的微信语音（165 帧/153KB PCM 全对） | 备选解码方案（独立 exe）；因用户偏好"纯 Python 原生"最终未采用 | 实测可用；引入需自行承担第三方二进制信任 |
 | [WeChatDataAnalysis](https://github.com/WeChatDataAnalysis/WeChatDataAnalysis) | ① 图片密钥派生：`md5(code+wxid)[:16]` + `xor=code&0xFF`，code 从进程内存扫描；② V2 dat 结构（15B 头：magic + aes_size + xor_size + pad）；③ WXGF 用 `VoipEngine.dll` 的 `wxam_dec_wxam2pic_5` 转码；④ SILK→WAV 转码 | 图片解密（`media_common.py` / `extract_image_key.py`）、WXGF 转码 | 其语音下载依赖第三方付费服务 wxcdn.c3o.re（配额/兑换码）——**本仓库评估后未采用**，改为本地 VoiceInfo 直取 |
 | [0xlane/wechat-dump-rs](https://github.com/0xlane/wechat-dump-rs) | 密钥从运行中微信进程提取、数据库自动解密的 Rust 工具；`media_*.db` 存语音的提示 | 总体思路印证 | 存续 |
-| [TANGandXue/wcdb-key-tool](https://github.com/TANGandXue/wcdb-key-tool) | 数据库密钥校验/解密函数（`verify_enc_key` / 库文件 HMAC 校验等） | `scripts/wcdb_key_tool_windows.py`（内嵌） | MIT（已在 LICENSE 登记） |
+| [TANGandXue/wcdb-key-tool](https://github.com/TANGandXue/wcdb-key-tool) | 数据库密钥校验/解密函数（`verify_enc_key` / 库文件 HMAC 校验等）；v2.3 进一步研究其 **macOS 版 `wcdb_key_tool_macos.py`（LLDB 断点系统符号 `CCKeyDerivationPBKDF`）与 Linux 版 `wcdb_key_tool.py`（ELF 锚点串 `com.Tencent.WCDB.Config.Cipher` + GDB）**，作为跨平台取密钥路线的依据，详见 `docs/WCDB_KEY_TOOL_RESEARCH.md` / `docs/CROSS_PLATFORM.md` | `scripts/wcdb_key_tool_windows.py`（内嵌）；跨平台移植路线结论 | MIT（已在 LICENSE 登记）；其 Credits 链 kkocdko / lopleec/wxchat-export / ylytdeng/wechat-decrypt |
 | [wxcdn.c3o.re](https://wxcdn.c3o.re)（第三方 CDN Worker） | 语音/媒体代下载服务契约（token/配额/redeem/download 端点），见 WeChatDataAnalysis `cdn_image_service.py` | **评估后未采用**：需上传微信 `global_config` 鉴权、配额付费、稳定性/隐私不可控 | 第三方服务，非开源 |
 | wechat-cli / wechat-smart-organizer（本机 skill） | 命令式导出思路 | **评估后未采用**：PyPI/GitHub 无对应包，命令全为空中楼阁（SKILL.md 踩坑#1/#16） | — |
 

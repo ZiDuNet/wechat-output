@@ -64,7 +64,7 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | 需要 | 说明 |
 |---|---|
 | Python 3.10+ | 任意本机 Python（脚本零第三方依赖） |
-| 本技能 `scripts/` 五个脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（媒体解密共享库） |
+| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py` |
 | `wcdb_key_tool_windows.py` | 密钥校验/解密函数来源（GitHub: TANGandXUE/wcdb-key-tool，MIT）。若本技能 scripts 未带，从该仓库取 |
 | zstandard（**实际必需**） | 解压压缩消息。`WCDB_CT_message_content=4` 或以 `\x28\xb5\x2f\xfd` 开头的消息都靠它。实测压缩占比很高（某读书群 161/201=**80%**、某时间管理群 496/1833=27%），**不装的话这些内容全变成 `[压缩未解]` 占位符**。1.8MB wheel，装隔离 venv |
 | sqlite3 / hashlib / ctypes | 全部标准库 |
@@ -342,6 +342,81 @@ python export_media.py --account-dir "..." --keys "..." --out "D:/媒体" --last
 python wx_export.py --group "群名" --outdir "D:/导出" --last 今天
 python wx_export.py --user "晓东" --outdir "D:/导出" --last 7d --with-zstd 2>&1 | Out-Null
 ```
+
+
+## v2.3 新增模块：朋友圈 / 收藏 / 专项消息 / 搜索 / 增量（均基于已解密库，不重复提密钥）
+
+> 以下六个脚本都只读 `--dec` 指向的已解密库，**不需要再提密钥/解密**（直接复用 `~/.wxcache/decrypted`），时间过滤统一走 `media_common`。本机实测规模：朋友圈 395 条、收藏 91 条、公众号 414 个/20384 篇、转账 1585/红包 1296/小程序 6831、搜索全库约 120 万行 0.24s。
+
+### 朋友圈导出（export_sns.py）
+
+读 `sns/sns.db` 的 `SnsTimeLine`（content 是 XML `<SnsDataItem><TimelineObject>`），按时间倒序导出：正文 contentDesc、地点、图片/视频 URL、分享链接；`SnsMessage_tmp3` 按 `feed_id = tid` 关联出评论/点赞（折叠在 `<details>` 里）。昵称优先取 XML 内 `<LocalExtraInfo><nickname>`，回退 contact 表。
+
+```bash
+python scripts/export_sns.py --dec "<decrypted>" --out "朋友圈.md"
+python scripts/export_sns.py --dec "<decrypted>" --out "朋友圈.md" --last 3m
+```
+
+### 收藏导出（export_favorite.py）
+
+读 `favorite/favorite.db` 的 `fav_db_item`，按 type 分组渲染（本机实测：文字25/图片16/链接14/合并转发15/语音6/视频6/位置2/笔记3/文件1/小程序1/视频号2），开头有类型统计表。
+
+```bash
+python scripts/export_favorite.py --dec "<decrypted>" --out "收藏.md"
+```
+
+### 服务号 / 公众号文章（export_biz.py）
+
+公众号推送单独存 `message/biz_message_0.db`（453 张 `Msg_<md5(gh_username)>` 分表），`message_content` 是 zstd 压缩 BLOB，解压后是 `<appmsg>` XML（title/des/url/category）。按公众号分组导出。
+
+```bash
+python scripts/export_biz.py --dec "<decrypted>" --out "公众号文章.md"
+python scripts/export_biz.py --dec "<decrypted>" --session gh_68b976f584b5 --out "某号.md"
+```
+
+### 转账 / 红包 / 小程序分享（export_transfer.py）
+
+跨 `message_0~8.db` 扫 `(local_type&255)=49` 的 appmsg，按 XML 子类型分流：
+
+| 类型 | 识别特征 | 可解析字段 |
+|---|---|---|
+| 转账 | `<type>2000</type>` + `<wcpayinfo>` | feedesc=金额、pay_memo=备注、paysubtype(1发起/3已收)、payer/receiver、transferid |
+| 红包 | `<type>2001</type>` | sendertitle/receivertitle=祝福语、nativeurl sendusername=发送人；**⚠️ 本地不存金额**（微信设计，金额只在账单） |
+| 小程序 | `<weappinfo>` 且 appid 非空(type=33) | title、sourcedisplayname=小程序名、appid、username、iconurl |
+
+```bash
+python scripts/export_transfer.py --dec "<dec>" --out "转账红包小程序.md"            # 三类全导
+python scripts/export_transfer.py --dec "<dec>" --kind transfer --out "转账.md"       # transfer/redpacket/miniapp
+```
+
+### 聊天搜索（search_messages.py）
+
+**直接复用微信自带 FTS5 索引**（`message/message_fts.db`，约 120 万行，不用自建索引）。两个关键坑已踩平：
+
+- 微信 FTS5 用自定义分词器 `MMFtsTokenizer`，Python 标准 sqlite3 报 `no such tokenizer` → 改读底层 `_content` 表 + LIKE 子串匹配（中文完全有效，全库 0.24s）。
+- FTS 库自带 `name2id`（7570 行）与 contact.db 的 name2id 行号**不一致**，必须用 FTS 自己的 name2id 反查 session_id/sender_id，再到 contact 查昵称（实测命中率 99.8%）。
+
+```bash
+python scripts/search_messages.py --dec "<dec>" --keyword "微信"
+python scripts/search_messages.py --dec "<dec>" --keyword "合同" --session "项目群" --last 7d
+python scripts/search_messages.py --dec "<dec>" --keyword "转账" --limit 20 --out 搜索结果.md
+```
+
+### 增量导出（export_incremental.py）
+
+状态文件 `.wechat_export_state.json` 记录每个会话已导出的最大 `create_time`（+ last_local_id）。首次全量并初始化；后续只拉 `create_time > 上次` 的新消息追加到 Markdown 末尾。
+
+```bash
+python scripts/export_incremental.py --dec "<dec>" --session "群名" --out "导出/群名.md"
+python scripts/export_incremental.py --dec "<dec>" --session "群名" --out "导出/群名.md" --full   # 强制全量
+```
+
+### 已知边界（如实记录）
+
+- 朋友圈/收藏的图片视频是微信 CDN 网络地址（qpic.cn），本地库不含原始媒体，脚本只导出链接不下载。
+- 红包金额本地库不存（`<feedesc>` 全空），属微信设计，需走「账单」导出。
+- 转账 paysubtype 仅能区分 1=发起/3=已收；已退款/已过期本机样本未覆盖，标"未解析(paysubtype=N)"。
+- 跨平台（macOS/Linux）适配可行性见 `docs/CROSS_PLATFORM.md`；wcdb-key-tool 三平台源码研究见 `docs/WCDB_KEY_TOOL_RESEARCH.md`。
 
 
 ## 踩坑实录（按遇到顺序）

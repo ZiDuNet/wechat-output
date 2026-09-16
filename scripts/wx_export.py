@@ -44,6 +44,12 @@ DECRYPT = os.path.join(HERE, "wcdb_key_tool_windows.py")
 EXPORT = os.path.join(HERE, "export_group_md.py")
 EXTRACT_IMG = os.path.join(HERE, "extract_image_key.py")
 EXPORT_MEDIA = os.path.join(HERE, "export_media.py")
+EXPORT_SNS = os.path.join(HERE, "export_sns.py")
+EXPORT_FAVORITE = os.path.join(HERE, "export_favorite.py")
+EXPORT_BIZ = os.path.join(HERE, "export_biz.py")
+EXPORT_TRANSFER = os.path.join(HERE, "export_transfer.py")
+SEARCH = os.path.join(HERE, "search_messages.py")
+EXPORT_INCREMENTAL = os.path.join(HERE, "export_incremental.py")
 
 # 缓存默认位置（敏感：含解密库+密钥），用 --cache 可改。
 # 发布版默认用户主目录（跨机器恒存在）；作者/团队可用 --cache 指向私有缓存。
@@ -253,6 +259,14 @@ def main():
     ap.add_argument("--purge", action="store_true", help="删除缓存（密钥+解密库，敏感；需配 --yes 确认）")
     ap.add_argument("--yes", action="store_true", help="配合 --purge 跳过删除确认")
     ap.add_argument("--sqlite", help="结构化输出 SQLite 路径（统计底座，可选）")
+    ap.add_argument("--sns", action="store_true", help="v2.3: 导出朋友圈（只读已解密缓存，--outdir 必填）")
+    ap.add_argument("--favorite", action="store_true", help="v2.3: 导出收藏（只读已解密缓存，--outdir 必填）")
+    ap.add_argument("--biz", action="store_true", help="v2.3: 导出服务号/公众号文章（--outdir 必填）")
+    ap.add_argument("--transfer", nargs="?", const="all", metavar="kind",
+                    help="v2.3: 导出转账/红包/小程序（kind=transfer/redpacket/miniapp/all，默认 all；--outdir 必填）")
+    ap.add_argument("--search", metavar="关键词", help="v2.3: 聊天全文搜索（结果打到 --outdir/搜索结果.md）")
+    ap.add_argument("--incremental", metavar="会话名",
+                    help="v2.3: 增量导出指定会话（状态文件记录上次位置；--outdir 必填）")
     ap.add_argument("--since", help="起始时间 YYYY-MM-DD[ HH:MM:SS]（含）")
     ap.add_argument("--until", help="结束时间 YYYY-MM-DD[ HH:MM:SS]（含当天）")
     ap.add_argument("--last", help="时间范围：today/今天、yesterday/昨天、7d/近7天、2w、3m、1y、all/全部")
@@ -269,12 +283,16 @@ def main():
             log(f"[i] 缓存不存在: {args.cache}")
         return
 
-    # 动作互斥：群 / 私聊 / 媒体 / 列表 必须选一个且互不混用
+    # 动作互斥：群 / 私聊 / 媒体 / 列表 / v2.3 新模块 必须选一个且互不混用
     actions = [a for a, on in (("--group", args.group), ("--user", args.user),
                                ("--media", args.media), ("--list-groups", args.list_groups),
-                               ("--list-contacts", args.list_contacts)) if on]
+                               ("--list-contacts", args.list_contacts),
+                               ("--sns", args.sns), ("--favorite", args.favorite),
+                               ("--biz", args.biz), ("--transfer", args.transfer),
+                               ("--search", args.search), ("--incremental", args.incremental)) if on]
     if not actions:
-        sys.exit("[x] 需要指定动作之一：--group / --user / --media / --list-groups / --list-contacts")
+        sys.exit("[x] 需要指定动作之一：--group / --user / --media / --list-groups / --list-contacts / "
+                 "--sns / --favorite / --biz / --transfer / --search / --incremental")
     if len(actions) > 1:
         sys.exit(f"[x] 动作互斥，一次只做一个：{', '.join(actions)}")
 
@@ -357,6 +375,46 @@ def main():
             if getattr(args, fl[2:]):
                 cmd += [fl, getattr(args, fl[2:])]
         run(cmd)
+        return
+
+    # ---- v2.3 新模块：只读已解密缓存（需之前跑过一次完整流程，decrypted 已就绪），不再提密钥 ----
+    v23 = [a for a, on in (("--sns", args.sns), ("--favorite", args.favorite),
+                           ("--biz", args.biz), ("--transfer", args.transfer),
+                           ("--search", args.search), ("--incremental", args.incremental)) if on]
+    if v23:
+        step(1, f"v2.3 模块：{v23[0]}（只读已解密缓存）")
+        dec = os.path.join(args.cache, "decrypted")
+        if not os.path.isdir(dec):
+            sys.exit(f"[x] 未找到已解密缓存: {dec}\n"
+                     "    v2.3 新模块只读解密库，请先用 --group/--user 跑一次完整流程（提密钥+解密）再用。")
+        if not args.outdir:
+            sys.exit("[x] v2.3 模块需要 --outdir 指定输出目录。")
+        os.makedirs(args.outdir, exist_ok=True)
+        def _time(cmd):
+            for fl in ("--since", "--until", "--last"):
+                if getattr(args, fl[2:]):
+                    cmd += [fl, getattr(args, fl[2:])]
+            return cmd
+        if args.sns:
+            run([EXPORT_SNS, "--dec", dec, "--out", os.path.join(args.outdir, "朋友圈.md")]
+                + _time([]))
+        elif args.favorite:
+            run([EXPORT_FAVORITE, "--dec", dec, "--out", os.path.join(args.outdir, "收藏.md")]
+                + _time([]))
+        elif args.biz:
+            run([EXPORT_BIZ, "--dec", dec, "--out", os.path.join(args.outdir, "公众号文章.md")]
+                + _time([]))
+        elif args.transfer:
+            run([EXPORT_TRANSFER, "--dec", dec, "--kind", args.transfer,
+                 "--out", os.path.join(args.outdir, "转账红包小程序.md")] + _time([]))
+        elif args.search:
+            run([SEARCH, "--dec", dec, "--keyword", args.search,
+                 "--out", os.path.join(args.outdir, f"搜索_{args.search}.md")] + _time([]))
+        elif args.incremental:
+            run([EXPORT_INCREMENTAL, "--dec", dec, "--session", args.incremental,
+                 "--out", os.path.join(args.outdir, re.sub(r'[\\/:*?"<>|]', "_", args.incremental) + "_聊天记录.md")]
+                + _time([]))
+        log(f"\n[√] 完成，输出目录: {args.outdir}")
         return
 
     # ---- Step 1 密钥（有缓存就跳过）
