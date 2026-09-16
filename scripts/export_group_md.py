@@ -133,6 +133,12 @@ def main():
     ap.add_argument("--sqlite", help="结构化输出 SQLite 路径（统计底座：群/成员/消息三张表）")
     ap.add_argument("--voice-map", help="语音时间线映射（export_voice.py 输出的 voice_map.json）："
                                         "把 [语音] 消息行嵌上对应 WAV 路径，可追溯到聊天时间")
+    ap.add_argument("--media-map", help="图片时间线映射（export_media.py 输出的 media_map.json）："
+                                        "把 [图片] 消息行嵌上解密后图片路径")
+    ap.add_argument("--files-map", help="文件时间线映射（export_files.py 输出的 files_map.json）："
+                                        "把文件消息行嵌上原文件路径")
+    from media_common import add_time_args, parse_time_range
+    add_time_args(ap)
     args = ap.parse_args()
     if not args.username and not args.group:
         sys.exit("[x] 需要 --group 群名关键词，或 --username 精确群 ID")
@@ -147,6 +153,26 @@ def main():
             voice_map = _json.load(f)
         voice_root = os.path.dirname(os.path.dirname(os.path.abspath(args.voice_map)))
         print(f"[i] 语音时间线映射已加载: {sum(len(v) for v in voice_map.values())} 条")
+
+    media_map, files_map = {}, {}
+    media_root = files_root = None
+    if args.media_map:
+        import json as _json
+        with open(args.media_map, encoding="utf-8") as f:
+            media_map = _json.load(f)
+        media_root = os.path.dirname(os.path.dirname(os.path.abspath(args.media_map)))
+        print(f"[i] 图片时间线映射已加载: {sum(len(v) for v in media_map.values())} 张")
+    if args.files_map:
+        import json as _json
+        with open(args.files_map, encoding="utf-8") as f:
+            files_map = _json.load(f)
+        files_root = os.path.dirname(os.path.dirname(os.path.abspath(args.files_map)))
+        print(f"[i] 文件时间线映射已加载: {sum(len(v) for v in files_map.values())} 个")
+
+    since_ts, until_ts = parse_time_range(args.since, args.until, args.last)
+    if since_ts or until_ts:
+        print(f"[i] 时间过滤: {args.since or '不限'} ~ {args.until or '不限'} "
+              f"({args.last or '全部'})")
 
     contact_db = find_file(args.dec, "contact.db")
     if not contact_db:

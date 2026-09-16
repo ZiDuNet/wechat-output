@@ -281,6 +281,36 @@ python export_voice.py --dec "<解密库目录>" --out "D:/语音导出" --limit
     效果：聊天记录里 `[语音] 🎤 语音/#[MOTHER]/2023-09-02_192148_001_#[MOTHER].wav`
     直接对应到当天该时刻的那条语音。
 
+### 媒体索引（文件/视频/图片 → 本地路径，v2.2 新增）
+
+场景：**"帮我拿一下和 XXX / XXX 群里面的文件/视频"** —— 只返回本地缓存路径，
+不复制、不移动、不修改微信数据。主入口 `export_media_index.py`：
+
+```bash
+# 某会话的文件（XML title ↔ msg/file 明文文件，消息级精确关联）
+python export_media_index.py --account-dir "<账号目录>" --dec "<解密库>" --session "晓东" --type file
+# 某会话的图片缓存（会话级：attach/<hash>/<月>/Img/*.dat，V2 加密，需 --media 解密才可用）
+python export_media_index.py --account-dir "<账号目录>" --dec "<解密库>" --session "#[MOTHER]" --type image
+# 全部视频（msg/video 无会话维度，只能全量+缩略图识别）
+python export_media_index.py --account-dir "<账号目录>" --dec "<解密库>" --type video
+# 时间过滤：今天 / 昨天 / 近 7 天 / 近 3 个月（与 --last 通用）
+python export_media_index.py --account-dir ... --dec ... --type all --last 7d
+# 结果写 JSON（含路径/时间/会话/大小）
+python export_media_index.py --account-dir ... --dec ... --type file --session "X" --out "./idx"
+```
+
+**三种媒体的存储与关联边界（实测，勿凭感觉改）**：
+
+| 媒体 | 本地存储 | 关联方式 | 说明 |
+|------|---------|---------|------|
+| 文件 | `msg/file/<月>/<原文件名>` 明文 | XML title ↔ 文件名（消息级 ✅） | 重名带 `(1)` 前缀容错 + 大小校验 |
+| 图片 | `attach/<会话hash>/<月>/Img/<md5>.dat` | 会话级 ✅（目录名=会话 hash） | ⚠️ XML 的 md5 与 dat 文件名**交集=0**（微信用另一套命名），**无法消息级**；dat 为 V2 加密，需 `wx_export.py --media` 解密成可用图片 |
+| 视频 | `msg/video/<月>/<md5>.mp4` 明文 | **无法按会话** | XML md5 与 mp4 文件名交集=0，mp4 文件名也不出现在消息 XML 任何字段；只能全量列出 + 缩略图人工识别 |
+
+**微信机制（用户亲口确认 + 全量测试佐证）**：只有**点开/下载过**的媒体才会落盘。
+未命中的媒体 = 未在微信客户端点开过，本地拿不到（工具无法凭空下载）。
+视频缩略图 `_thumb.jpg` 与 mp4 同名同目录，可作识别线索。
+
 
 ## 踩坑实录（按遇到顺序）
 
