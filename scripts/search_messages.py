@@ -40,6 +40,29 @@ FTS_CONTENT_TABLES = [
     "message_fts_v4_3_content",
 ]
 
+# --type 类型过滤（按 local_type 低位 (c3 & 255) 映射，与微信 4.x 类型表一致）
+# 注意：49 系 appmsg（链接/文件/转账/红包/小程序）低位同为 49，低位类型无法再分；
+#      要区分"文件 vs 链接"需解析 appmsg XML，超出"结果侧按类型筛"的范围，故 link/file 同集。
+#      system 是整值哨兵（10000/10002），不取低位（10000&0xFF=16 会错），单独用 TYPE_MATCH 判。
+TYPE_FILTER_MAP = {
+    "text":     {1},
+    "image":    {3},
+    "voice":    {34},
+    "video":    {43},
+    "sticker":  {47},
+    "location": {48},
+    "link":     {49},   # 链接/转账/红包/小程序（appmsg 低位 49）
+    "file":     {49},   # 文件同属 appmsg 低位 49（与 link 同集，见上注）
+}
+
+
+def type_matches(local_type, name):
+    """判断某条 FTS 结果的 local_type 是否命中 --type。"""
+    v = local_type or 0
+    if name == "system":
+        return v in (10000, 10002)
+    return (v & 0xFF) in TYPE_FILTER_MAP[name]
+
 
 def find_file(dec, name):
     """在 dec 目录下递归找文件（复用 export_group_md.py 同名函数逻辑）"""
@@ -124,6 +147,9 @@ def main():
     ap.add_argument("--session", help="限定会话：群名/联系人名 或 username（如 xxx@chatroom）")
     ap.add_argument("--limit", type=int, default=50, help="最多返回条数（默认 50）")
     ap.add_argument("--out", help="输出 Markdown 文件路径（默认打印到 stdout）")
+    ap.add_argument("--type", choices=sorted(list(TYPE_FILTER_MAP.keys()) + ["system"]),
+                    help="按消息类型过滤（在 FTS 拿到结果后按 local_type 筛，不改 FTS 查询）："
+                         "text/image/voice/video/sticker/location/link/file/system")
     from media_common import add_time_args, parse_time_range
     add_time_args(ap)
     args = ap.parse_args()
@@ -204,7 +230,7 @@ def main():
     clauses = []
     params = []
     for tbl in FTS_CONTENT_TABLES:
-        sql = (f"SELECT c0 AS acontent, c4 AS session_id, c5 AS sender_id, "
+        sql = (f"SELECT c0 AS acontent, c3 AS local_type, c4 AS session_id, c5 AS sender_id, "
                f"c6 AS create_time, '{tbl}' AS src "
                f"FROM {tbl} WHERE c0 LIKE ?")
         p = [like_pat]
@@ -233,7 +259,13 @@ def main():
         rows = conn.execute(sql, p).fetchall()
         all_rows.extend(rows)
     elapsed = datetime.now().timestamp() - t0
-    print(f"[i] 原始命中 {len(all_rows)} 条（耗时 {elapsed:.2f}s），按时间倒序取前 {args.limit} 条")
+    raw_count = len(all_rows)
+    # 结果侧类型过滤（不改 FTS 查询逻辑，只在拿到结果后按 local_type 筛）
+    if args.type:
+        all_rows = [r for r in all_rows if type_matches(r["local_type"], args.type)]
+    print(f"[i] 原始命中 {raw_count} 条（耗时 {elapsed:.2f}s）"
+          + (f"，类型[{args.type}]过滤后 {len(all_rows)} 条" if args.type else "")
+          + f"，按时间倒序取前 {args.limit} 条")
 
     # 按时间倒序排序
     all_rows.sort(key=lambda r: r["create_time"] or 0, reverse=True)
@@ -246,6 +278,8 @@ def main():
              f"| 显示 {len(result)} 条\n"]
     if args.session:
         lines.append(f"> 会话过滤: {args.session}\n")
+    if args.type:
+        lines.append(f"> 类型过滤: {args.type}\n")
     if since_ts or until_ts:
         lines.append(f"> 时间范围: {args.since or '不限'} ~ {args.until or '不限'} "
                      f"({args.last or ''})\n")
