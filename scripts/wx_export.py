@@ -39,8 +39,19 @@ if hasattr(sys.stdout, "reconfigure"):
     sys.stdout.reconfigure(errors="replace")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
-EXTRACT = os.path.join(HERE, "extract_keys_413.py")
-DECRYPT = os.path.join(HERE, "wcdb_key_tool_windows.py")
+# 密钥提取/解密脚本按平台切换：Windows 走 413 + wcdb_key_tool_windows；
+# darwin/linux 走各自的 extract_keys_<os>.py（CLI 同为 extract/decrypt 子命令）。
+if sys.platform == "win32":
+    EXTRACT = os.path.join(HERE, "extract_keys_413.py")
+    DECRYPT = os.path.join(HERE, "wcdb_key_tool_windows.py")
+elif sys.platform == "darwin":
+    EXTRACT = os.path.join(HERE, "extract_keys_macos.py")
+    DECRYPT = os.path.join(HERE, "extract_keys_macos.py")
+elif sys.platform.startswith("linux"):
+    EXTRACT = os.path.join(HERE, "extract_keys_linux.py")
+    DECRYPT = os.path.join(HERE, "extract_keys_linux.py")
+else:
+    sys.exit(f"[x] 不支持的平台: {sys.platform!r}（仅 win32/darwin/linux）")
 EXPORT = os.path.join(HERE, "export_group_md.py")
 EXTRACT_IMG = os.path.join(HERE, "extract_image_key.py")
 EXPORT_MEDIA = os.path.join(HERE, "export_media.py")
@@ -78,7 +89,21 @@ def run(cmd):
 
 
 def find_wechat_install_dirs():
-    """运行中 Weixin.exe 的安装目录候选"""
+    """微信安装目录候选（按平台分支）。
+    - win32：运行中 Weixin.exe 所在目录（原逻辑，保持现状）。
+    - darwin：/Applications/WeChat.app。
+    - linux：/opt/wechat、/usr/bin/wechat 同级目录。
+    """
+    if sys.platform == "darwin":
+        app = "/Applications/WeChat.app"
+        return [app] if os.path.isdir(app) else []
+    if sys.platform.startswith("linux"):
+        dirs = []
+        for c in ("/opt/wechat", os.path.dirname("/usr/bin/wechat")):
+            if os.path.isdir(c):
+                dirs.append(c)
+        return dirs
+    # win32（原逻辑，逐字节保持）
     dirs = []
     try:
         out = subprocess.run(
@@ -91,6 +116,15 @@ def find_wechat_install_dirs():
     except Exception:
         pass
     return dirs
+
+
+def run_extract_keys(db_dir, dump, keys):
+    """按平台调用对应密钥提取脚本（Windows 走 413 直参；mac/linux 走 extract 子命令）。"""
+    if sys.platform == "win32":
+        run([EXTRACT, "--db-dir", db_dir, "--dump-dir", dump, "--out", keys])
+    else:
+        # darwin/linux：python <script> extract --db-dir ... --out ...
+        run([EXTRACT, "extract", "--db-dir", db_dir, "--out", keys])
 
 
 def read_text(path):
@@ -111,8 +145,8 @@ def db_file_set(d):
             for p in glob.glob(os.path.join(d, "**", "*.db"), recursive=True)}
 
 
-def detect_db_dir():
-    """自动探测 db_storage：ini -> 数据根目录 -> xwechat_files/<wxid>/db_storage"""
+def _detect_db_dir_win():
+    """Windows：ini -> 数据根目录 -> xwechat_files/<wxid>/db_storage（原逻辑，逐字节保持）。"""
     ini_dirs = []
     for d in find_wechat_install_dirs():
         ini_dirs.append(os.path.join(d, "xwechat", "config"))
@@ -151,6 +185,44 @@ def detect_db_dir():
         cands.sort(key=lambda c: -len(glob.glob(os.path.join(c, "**", "*.db"), recursive=True)))
         log(f"  [i] 发现 {len(cands)} 个账号目录，取消息库最多的: {os.path.basename(os.path.dirname(cands[0]))}")
     return cands[0], None
+
+
+def _pick_account(cands):
+    """多账号候选取 .db 最多的那个（三平台共用）。"""
+    cands = [c for c in cands if os.path.isdir(c)]
+    if not cands:
+        return None
+    if len(cands) > 1:
+        cands.sort(key=lambda c: -len(glob.glob(os.path.join(c, "**", "*.db"), recursive=True)))
+        log(f"  [i] 发现 {len(cands)} 个账号目录，取消息库最多的: {os.path.basename(os.path.dirname(cands[0]))}")
+    return cands[0]
+
+
+def detect_db_dir():
+    """自动探测 db_storage（按 sys.platform 三分支）。
+
+    - win32：ini -> 数据根目录 -> xwechat_files/<wxid>/db_storage（原逻辑）。
+    - darwin：~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage。
+    - linux：~/.local/share/com.tencent.wechat/xwechat_files/<wxid>/db_storage。
+    """
+    if sys.platform == "darwin":
+        root = os.path.expanduser(
+            "~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files")
+        if not os.path.isdir(root):
+            return None, f"未找到 mac 沙盒数据目录: {root}"
+        cands = sorted(glob.glob(os.path.join(root, "*", "db_storage")))
+        db = _pick_account(cands)
+        return (db, None) if db else (None, f"{root} 下没有 */db_storage")
+
+    if sys.platform.startswith("linux"):
+        root = os.path.expanduser("~/.local/share/com.tencent.wechat/xwechat_files")
+        if not os.path.isdir(root):
+            return None, f"未找到 Linux 数据目录: {root}（兜底: ~/.xwechat）"
+        cands = sorted(glob.glob(os.path.join(root, "*", "db_storage")))
+        db = _pick_account(cands)
+        return (db, None) if db else (None, f"{root} 下没有 */db_storage")
+
+    return _detect_db_dir_win()
 
 
 def db_count(d):
@@ -424,7 +496,7 @@ def main():
     else:
         os.makedirs(dump, exist_ok=True)
         log("  [i] 首次运行需扫描微信内存，约 30s ~ 8min ...")
-        run([EXTRACT, "--db-dir", db_dir, "--dump-dir", dump, "--out", keys])
+        run_extract_keys(db_dir, dump, keys)
         if not os.path.isfile(keys):
             sys.exit("[x] 密钥提取未产出 all_keys.json（微信是否在运行/已登录？）\n"
                      "    若你的微信不是 4.1.13.x 系列（本技能实测 4.1.13.63），密钥格式可能已变化：\n"
@@ -454,7 +526,7 @@ def main():
                 os.remove(keys)
             shutil.rmtree(dec, ignore_errors=True)
             os.makedirs(dump, exist_ok=True)
-            run([EXTRACT, "--db-dir", db_dir, "--dump-dir", dump, "--out", keys])
+            run_extract_keys(db_dir, dump, keys)
             do_decrypt()
         # 二次校验（审计 E3）：自愈重试后仍缺过半就明确报错退出，绝不带着缺口报"就绪"
         if len(db_file_set(dec)) < max(1, n_src // 2):

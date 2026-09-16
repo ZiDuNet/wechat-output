@@ -15,7 +15,6 @@ media_helpers）的算法，重写为零第三方依赖的 Windows 版本：
 所有函数无机器路径硬编码；账号目录 / 输出目录由调用方显式传入。
 """
 import ctypes
-import ctypes.wintypes as wt
 import hashlib
 import os
 import struct
@@ -23,62 +22,15 @@ import subprocess
 import sys
 import time
 
+from aes_backend import aes_ecb_decrypt  # 跨平台 AES-128-ECB（win=bcrypt，零依赖）
+
 V2_MAGIC = b"\x07\x08\x56\x32\x08\x07"
 V1_MAGIC = b"\x07\x08\x56\x31\x08\x07"
 AES_BLOCK = 16
 
-# ---------------------------------------------------------------- AES (bcrypt.dll)
-
-_bcrypt = None
-if sys.platform == "win32":
-    _bcrypt = ctypes.WinDLL("bcrypt")
-    _bcrypt.BCryptOpenAlgorithmProvider.argtypes = [ctypes.POINTER(wt.HANDLE), ctypes.c_wchar_p, ctypes.c_wchar_p, ctypes.c_ulong]
-    _bcrypt.BCryptSetProperty.argtypes = [wt.HANDLE, ctypes.c_wchar_p, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_ulong]
-    _bcrypt.BCryptGenerateSymmetricKey.argtypes = [
-        wt.HANDLE, ctypes.POINTER(wt.HANDLE), ctypes.c_char_p, ctypes.c_ulong,
-        ctypes.c_char_p, ctypes.c_ulong, ctypes.c_ulong,
-    ]
-    _bcrypt.BCryptDecrypt.argtypes = [
-        wt.HANDLE, ctypes.c_char_p, ctypes.c_ulong, ctypes.c_void_p,
-        ctypes.c_char_p, ctypes.c_ulong, ctypes.c_char_p, ctypes.c_ulong,
-        ctypes.POINTER(ctypes.c_ulong), ctypes.c_ulong,
-    ]
-    _bcrypt.BCryptDestroyKey.argtypes = [wt.HANDLE]
-    _bcrypt.BCryptCloseAlgorithmProvider.argtypes = [wt.HANDLE, ctypes.c_ulong]
-
-
-def aes_ecb_decrypt(key: bytes, data: bytes) -> bytes:
-    """AES-ECB 解密（无 padding），CNG bcrypt.dll，零第三方依赖。"""
-    if _bcrypt is None:
-        raise RuntimeError("非 Windows 平台暂不支持")
-    h_alg = wt.HANDLE()
-    status = _bcrypt.BCryptOpenAlgorithmProvider(ctypes.byref(h_alg), "AES", None, 0)
-    if status != 0:
-        raise RuntimeError(f"BCryptOpenAlgorithmProvider failed: {status:#x}")
-    try:
-        mode = ("ChainingModeECB\x00").encode("utf-16-le")
-        status = _bcrypt.BCryptSetProperty(h_alg, "ChainingMode", mode, len(mode), 0)
-        if status != 0:
-            raise RuntimeError(f"BCryptSetProperty failed: {status:#x}")
-        h_key = wt.HANDLE()
-        status = _bcrypt.BCryptGenerateSymmetricKey(h_alg, ctypes.byref(h_key), None, 0, key, len(key), 0)
-        if status != 0:
-            raise RuntimeError(f"BCryptGenerateSymmetricKey failed: {status:#x}")
-        try:
-            out_buf = ctypes.create_string_buffer(len(data))
-            result_len = ctypes.c_ulong(0)
-            status = _bcrypt.BCryptDecrypt(
-                h_key, data, len(data), None,
-                None, 0,
-                out_buf, len(out_buf), ctypes.byref(result_len), 0,
-            )
-            if status != 0:
-                raise RuntimeError(f"BCryptDecrypt failed: {status:#x}")
-            return out_buf.raw[: result_len.value]
-        finally:
-            _bcrypt.BCryptDestroyKey(h_key)
-    finally:
-        _bcrypt.BCryptCloseAlgorithmProvider(h_alg, 0)
+# ---------------------------------------------------------------- AES（走 aes_backend 跨平台后端）
+# aes_ecb_decrypt 已从 aes_backend 导入（win32=bcrypt.dll CNG，行为与原实现逐字节一致；
+# darwin=CommonCrypto CCCrypt；linux=OpenSSL EVP）。此处不再直连 bcrypt。
 
 
 def pkcs7_unpad(data: bytes) -> bytes:
@@ -211,57 +163,228 @@ def verify_aes_key(aes_key: bytes, ciphertext: bytes) -> bool:
     return detect_image_format(pt) is not None
 
 
-# ---------------------------------------------------------------- 进程内存
+# ---------------------------------------------------------------- 进程内存（平台抽象）
+# 统一原语：_find_wechat_pids / _open_process(pid) / _close_process(h)
+#           / _enum_regions(h) / _read_mem(h, addr, sz)
+# win32 走原 kernel32 三件套（与旧实现逐字节一致）；darwin/linux 分支只在对应平台执行。
 
 MEM_COMMIT = 0x1000
 READABLE = {0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80}
 MAX_ADDR = 0x7FFFFFFFFFFF
 
 
-class MBI(ctypes.Structure):
-    _fields_ = [("BaseAddress", ctypes.c_uint64), ("AllocationBase", ctypes.c_uint64),
-                ("AllocationProtect", wt.DWORD), ("_pad1", wt.DWORD),
-                ("RegionSize", ctypes.c_uint64), ("State", wt.DWORD),
-                ("Protect", wt.DWORD), ("Type", wt.DWORD), ("_pad2", wt.DWORD)]
+if sys.platform == "win32":
+    import ctypes.wintypes as _wt  # noqa: E402  仅 Windows 存在
+
+    class MBI(ctypes.Structure):
+        _fields_ = [("BaseAddress", ctypes.c_uint64), ("AllocationBase", ctypes.c_uint64),
+                    ("AllocationProtect", _wt.DWORD), ("_pad1", _wt.DWORD),
+                    ("RegionSize", ctypes.c_uint64), ("State", _wt.DWORD),
+                    ("Protect", _wt.DWORD), ("Type", _wt.DWORD), ("_pad2", _wt.DWORD)]
+
+    _k32 = ctypes.windll.kernel32
+    _VM_READ, _QUERY = 0x0010, 0x0400
+
+    def _find_wechat_pids():
+        """Windows：tasklist 找 Weixin.exe，按内存降序。"""
+        try:
+            r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
+                               capture_output=True, text=True, errors="replace", encoding="mbcs")
+        except Exception:
+            return []
+        pids = []
+        for line in r.stdout.strip().split("\n"):
+            p = line.strip('"').split('","')
+            if len(p) >= 5:
+                try:
+                    pids.append((int(p[1]), int(p[4].replace(",", "").replace(" K", "").strip() or "0")))
+                except ValueError:
+                    continue
+        return sorted(pids, key=lambda x: x[1], reverse=True)
+
+    def _open_process(pid):
+        return _k32.OpenProcess(_VM_READ | _QUERY, False, pid)
+
+    def _close_process(h):
+        if h:
+            _k32.CloseHandle(h)
+
+    def _read_mem(h, addr, sz):
+        buf = ctypes.create_string_buffer(sz)
+        n = ctypes.c_size_t(0)
+        if _k32.ReadProcessMemory(h, ctypes.c_uint64(addr), buf, sz, ctypes.byref(n)):
+            return buf.raw[: n.value]
+        return None
+
+    def _enum_regions(h):
+        regs, addr, mbi = [], 0, MBI()
+        while addr < MAX_ADDR:
+            if _k32.VirtualQueryEx(h, ctypes.c_uint64(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)) == 0:
+                break
+            if mbi.State == MEM_COMMIT and mbi.Protect in READABLE and 0 < mbi.RegionSize < 500 * 1024 * 1024:
+                regs.append((mbi.BaseAddress, mbi.RegionSize))
+            nxt = mbi.BaseAddress + mbi.RegionSize
+            if nxt <= addr:
+                break
+            addr = nxt
+        return regs
 
 
+elif sys.platform == "darwin":
+    # 【代码级验证，未真机】移植自上游 wcdb_key_tool_macos.py：
+    # task_for_pid + mach_vm_region + mach_vm_read。前置：sudo codesign 重签 WeChat.app、root。
+    import ctypes.util as _cu  # noqa: E402
+
+    KERN_SUCCESS = 0
+    VM_REGION_BASIC_INFO_64 = 9
+    VM_REGION_BASIC_INFO_COUNT_64 = 9
+    VM_PROT_READ = 0x01
+    _libSystem = ctypes.CDLL(_cu.find_library("System"))
+    _libSystem.mach_task_self.restype = ctypes.c_uint32
+
+    class vm_region_basic_info_64(ctypes.Structure):
+        _fields_ = [
+            ("protection", ctypes.c_int32), ("max_protection", ctypes.c_int32),
+            ("inheritance", ctypes.c_uint32), ("shared", ctypes.c_uint32),
+            ("reserved", ctypes.c_uint32), ("offset", ctypes.c_uint64),
+            ("behavior", ctypes.c_int32), ("user_wired_count", ctypes.c_uint16),
+        ]
+
+    def _find_wechat_pids():
+        """macOS：pgrep -x WeChat。"""
+        try:
+            r = subprocess.run(["pgrep", "-x", "WeChat"], capture_output=True, text=True)
+            return [(int(p), 0) for p in r.stdout.split() if p.strip().isdigit()]
+        except (FileNotFoundError, ValueError):
+            return []
+
+    def _open_process(pid):
+        """返回 mach task port（作为后续读写的句柄 h）。"""
+        task = ctypes.c_uint32(0)
+        kr = _libSystem.task_for_pid(_libSystem.mach_task_self(), ctypes.c_int(pid), ctypes.byref(task))
+        if kr != KERN_SUCCESS:
+            raise PermissionError(
+                f"task_for_pid failed for PID={pid} (kern_return={kr})。"
+                "macOS 需先 sudo codesign --force --deep --sign - /Applications/WeChat.app 去 Hardened Runtime 并重启微信，且以 root 运行。"
+            )
+        return task.value
+
+    def _close_process(h):
+        # mach task port 无需显式关闭
+        return None
+
+    def _read_mem(h, addr, sz):
+        data_ptr = ctypes.c_uint64(0)
+        data_size = ctypes.c_uint64(0)
+        kr = _libSystem.mach_vm_read(ctypes.c_uint32(h), ctypes.c_uint64(addr),
+                                     ctypes.c_uint64(sz), ctypes.byref(data_ptr), ctypes.byref(data_size))
+        if kr != KERN_SUCCESS:
+            return None
+        try:
+            return ctypes.string_at(data_ptr.value, data_size.value)
+        finally:
+            _libSystem.mach_vm_deallocate(_libSystem.mach_task_self(), data_ptr, data_size)
+
+    def _enum_regions(h):
+        regions = []
+        address = ctypes.c_uint64(0)
+        size = ctypes.c_uint64(0)
+        info = vm_region_basic_info_64()
+        info_count = ctypes.c_uint32(VM_REGION_BASIC_INFO_COUNT_64)
+        object_name = ctypes.c_uint32(0)
+        while True:
+            kr = _libSystem.mach_vm_region(
+                ctypes.c_uint32(h), ctypes.byref(address), ctypes.byref(size),
+                ctypes.c_int(VM_REGION_BASIC_INFO_64), ctypes.byref(info),
+                ctypes.byref(info_count), ctypes.byref(object_name))
+            if kr != KERN_SUCCESS:
+                break
+            reg_size = size.value
+            if (info.protection & VM_PROT_READ) and 0 < reg_size < 500 * 1024 * 1024:
+                regions.append((address.value, reg_size))
+            nxt = address.value + reg_size
+            if nxt <= address.value:
+                break
+            address.value = nxt
+        return regions
+
+
+elif sys.platform.startswith("linux"):
+    # 【代码级验证，未真机】/proc/<pid>/maps + /proc/<pid>/mem。前置：root 或放开 yama/ptrace_scope。
+    class _LinuxProc:
+        """把 (pid, mem_fd) 包成不透明句柄 h。"""
+        __slots__ = ("pid", "mem")
+
+        def __init__(self, pid, mem):
+            self.pid = pid
+            self.mem = mem
+
+    def _find_wechat_pids():
+        """Linux：遍历 /proc/*/exe 找结尾 /wechat 的进程。"""
+        pids = []
+        for pid_str in os.listdir("/proc"):
+            if not pid_str.isdigit():
+                continue
+            try:
+                exe = os.readlink(f"/proc/{pid_str}/exe")
+                if exe.endswith("/wechat"):
+                    pids.append((int(pid_str), 0))
+            except (OSError, PermissionError):
+                continue
+        return pids
+
+    def _open_process(pid):
+        mem = os.open(f"/proc/{pid}/mem", os.O_RDONLY)
+        return _LinuxProc(pid, mem)
+
+    def _close_process(h):
+        try:
+            os.close(h.mem)
+        except OSError:
+            pass
+
+    def _read_mem(h, addr, sz):
+        try:
+            return os.pread(h.mem, sz, addr)
+        except OSError:
+            return None
+
+    def _enum_regions(h):
+        regions = []
+        try:
+            with open(f"/proc/{h.pid}/maps", "r", encoding="utf-8") as f:
+                for line in f:
+                    parts = line.split()
+                    if len(parts) < 5:
+                        continue
+                    perms = parts[1]
+                    if "r" not in perms:
+                        continue
+                    start_s, end_s = parts[0].split("-")
+                    start, end = int(start_s, 16), int(end_s, 16)
+                    size = end - start
+                    if 0 < size < 500 * 1024 * 1024:
+                        regions.append((start, size))
+        except OSError:
+            pass
+        return regions
+
+
+else:
+    raise RuntimeError(f"不支持的平台: {sys.platform!r}（内存提取仅支持 win32/darwin/linux）")
+
+
+# 向后兼容别名（旧调用方仍可用 read_mem/enum_regions/find_wechat_pids）
 def read_mem(h, addr, sz):
-    buf = ctypes.create_string_buffer(sz)
-    n = ctypes.c_size_t(0)
-    if ctypes.windll.kernel32.ReadProcessMemory(h, ctypes.c_uint64(addr), buf, sz, ctypes.byref(n)):
-        return buf.raw[: n.value]
-    return None
+    return _read_mem(h, addr, sz)
 
 
 def enum_regions(h):
-    regs, addr, mbi = [], 0, MBI()
-    while addr < MAX_ADDR:
-        if ctypes.windll.kernel32.VirtualQueryEx(h, ctypes.c_uint64(addr), ctypes.byref(mbi), ctypes.sizeof(mbi)) == 0:
-            break
-        if mbi.State == MEM_COMMIT and mbi.Protect in READABLE and 0 < mbi.RegionSize < 500 * 1024 * 1024:
-            regs.append((mbi.BaseAddress, mbi.RegionSize))
-        nxt = mbi.BaseAddress + mbi.RegionSize
-        if nxt <= addr:
-            break
-        addr = nxt
-    return regs
+    return _enum_regions(h)
 
 
 def find_wechat_pids():
-    try:
-        r = subprocess.run(["tasklist", "/FI", "IMAGENAME eq Weixin.exe", "/FO", "CSV", "/NH"],
-                           capture_output=True, text=True, errors="replace", encoding="mbcs")
-    except Exception:
-        return []
-    pids = []
-    for line in r.stdout.strip().split("\n"):
-        p = line.strip('"').split('","')
-        if len(p) >= 5:
-            try:
-                pids.append((int(p[1]), int(p[4].replace(",", "").replace(" K", "").strip() or "0")))
-            except ValueError:
-                continue
-    return sorted(pids, key=lambda x: x[1], reverse=True)
+    return _find_wechat_pids()
 
 
 def scan_code_in_memory(wxid: str, xor_hint: int | None = None, progress=None):
@@ -271,11 +394,9 @@ def scan_code_in_memory(wxid: str, xor_hint: int | None = None, progress=None):
     返回 [(code, 出现次数), ...] 按次数降序。真实 code 在内存有大量副本（实测数百处），
     由调用方按序派生密钥验证模板密文即可命中。
     """
-    kernel32 = ctypes.windll.kernel32
-    PROCESS_VM_READ, PROCESS_QUERY = 0x0010, 0x0400
     candidates = {}
     for pid, _kb in find_wechat_pids():
-        h = kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY, False, pid)
+        h = _open_process(pid)
         if not h:
             continue
         try:
@@ -297,7 +418,7 @@ def scan_code_in_memory(wxid: str, xor_hint: int | None = None, progress=None):
                                 candidates[code] = candidates.get(code, 0) + 1
                         i += 1
         finally:
-            kernel32.CloseHandle(h)
+            _close_process(h)
         if progress:
             progress(f"  [i] pid={pid} 扫描完成，候选 code 累计 {len(candidates)} 个")
     if not candidates:
@@ -315,13 +436,11 @@ def scan_key_in_memory(template_scan, timeout=180, interval=5, progress=None):
     ciphertext = template_scan.get("ciphertext")
     if not ciphertext:
         return None
-    kernel32 = ctypes.windll.kernel32
-    PROCESS_VM_READ, PROCESS_QUERY = 0x0010, 0x0400
     HEXCH = set(b"0123456789abcdefABCDEF")
     deadline = time.time() + timeout
     while time.time() < deadline:
         for pid, _kb in find_wechat_pids():
-            h = kernel32.OpenProcess(PROCESS_VM_READ | PROCESS_QUERY, False, pid)
+            h = _open_process(pid)
             if not h:
                 continue
             try:
@@ -350,7 +469,7 @@ def scan_key_in_memory(template_scan, timeout=180, interval=5, progress=None):
                             else:
                                 i += 1
             finally:
-                kernel32.CloseHandle(h)
+                _close_process(h)
         if progress:
             progress(f"  [i] 轮询中... 剩余 {int(deadline - time.time())}s（请打开微信任意一张图片查看）")
         time.sleep(interval)
@@ -364,34 +483,63 @@ class WxAMConfig(ctypes.Structure):
 
 
 def find_voip_engine_dll(install_dir=None):
-    """找微信安装目录的 VoipEngine.dll（WXGF 解码器）。"""
-    cands = []
-    if install_dir:
-        cands.append(install_dir)
-    # 从运行中的 Weixin.exe 定位安装目录
-    try:
-        out = subprocess.run(
-            ["powershell", "-NoProfile", "-Command",
-             "(Get-Process -Name Weixin -ErrorAction SilentlyContinue | "
-             "Select-Object -First 1 -ExpandProperty Path)"],
-            capture_output=True, text=True, timeout=30).stdout.strip()
-        if out and os.path.isfile(out):
-            cands.append(os.path.dirname(out))
-    except Exception:
-        pass
-    for c in cands:
-        for root, _d, files in os.walk(c):
-            if "VoipEngine.dll" in files:
-                return os.path.join(root, "VoipEngine.dll")
-            # 微信目录通常不深，限制层级避免全盘
+    """找微信自带的 WXGF 解码器（win=VoipEngine.dll；mac=WeChat.app 内 dylib；linux=不可用）。
+
+    返回可传给 wxgf_to_image 的库路径（str），找不到返回 None。
+    - win32：原逻辑，从运行中 Weixin.exe 定位安装目录后找 VoipEngine.dll。【已验证】
+    - darwin：【推断，未真机】在 /Applications/WeChat.app/Contents/Frameworks 下找
+      可能含 wxam_dec_wxam2pic_5 导出符号的 .dylib。微信 4.x 与 Windows 共用 WCDB/
+      图片解码代码，符号名大概率一致；但未在 mac 真机核对具体 dylib 名。
+    - linux：官方 Linux 微信不一定附带同款解码库，直接降级为 None。
+    """
+    if sys.platform == "win32":
+        cands = []
+        if install_dir:
+            cands.append(install_dir)
+        # 从运行中的 Weixin.exe 定位安装目录
+        try:
+            out = subprocess.run(
+                ["powershell", "-NoProfile", "-Command",
+                 "(Get-Process -Name Weixin -ErrorAction SilentlyContinue | "
+                 "Select-Object -First 1 -ExpandProperty Path)"],
+                capture_output=True, text=True, timeout=30).stdout.strip()
+            if out and os.path.isfile(out):
+                cands.append(os.path.dirname(out))
+        except Exception:
+            pass
+        for c in cands:
+            for root, _d, files in os.walk(c):
+                if "VoipEngine.dll" in files:
+                    return os.path.join(root, "VoipEngine.dll")
+                # 微信目录通常不深，限制层级避免全盘
+        return None
+
+    if sys.platform == "darwin":
+        # 【推断，未真机】macOS：定位 WeChat.app 内的候选 dylib
+        base = install_dir or "/Applications/WeChat.app"
+        fw = os.path.join(base, "Contents", "Frameworks")
+        if os.path.isdir(fw):
+            for root, _d, files in os.walk(fw):
+                for fn in files:
+                    if fn.endswith(".dylib"):
+                        return os.path.join(root, fn)
+        print("[media_common][WXGF] macOS 未在 WeChat.app/Contents/Frameworks 找到解码器 dylib："
+              "未查看原图暂不可用，已查看的明文图/视频不受影响。", flush=True)
+        return None
+
+    # linux 及其它：降级说明
+    print("[media_common][WXGF] Linux 官方微信不附带 WXGF 解码库：未查看原图暂不可用，"
+          "已查看的明文图/视频不受影响。", flush=True)
     return None
 
 
 def wxgf_to_image(data: bytes, dll_path: str) -> bytes | None:
-    """WXGF 容器转码为 jpg（微信自带 WxAM 解码器）。"""
+    """WXGF 容器转码为 jpg（微信自带 WxAM 解码器 wxam_dec_wxam2pic_5）。"""
     try:
-        dll = ctypes.WinDLL(dll_path)
-        fn = dll.wxam_dec_wxam2pic_5
+        # win32 用 WinDLL；darwin 用 CDLL（dylib）。Linux 上 dll_path 恒为 None，不会进到这。
+        loader = ctypes.WinDLL if sys.platform == "win32" else ctypes.CDLL
+        lib = loader(dll_path)
+        fn = lib.wxam_dec_wxam2pic_5
         fn.argtypes = [ctypes.c_int64, ctypes.c_int, ctypes.c_int64,
                        ctypes.POINTER(ctypes.c_int), ctypes.c_int64]
         fn.restype = ctypes.c_int64
