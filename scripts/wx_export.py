@@ -17,6 +17,10 @@
     # 清掉缓存（密钥 + 解密库，敏感）
     python wx_export.py --purge
 
+    # v2.5: 全天跨会话梳理包（群+私聊，一天一梳：总览+逐会话文件+小时分节）
+    python wx_export.py --digest yesterday --outdir "D:\\导出\\昨天"
+    python wx_export.py --digest 2026-09-16 --outdir "D:\\导出" --merge-under 100
+
 设计要点:
     - 缓存复用：密钥/解密库缓存在 --cache 下，第二次导出别的群只需几秒（跳过耗时的提密钥+解密）。
     - 自动探测：从运行中的 Weixin.exe 定位安装目录 -> xwechat/config/*.ini -> 数据根目录。
@@ -374,10 +378,12 @@ def main():
                                ("--sns", args.sns), ("--favorite", args.favorite),
                                ("--biz", args.biz), ("--transfer", args.transfer),
                                ("--search", args.search), ("--incremental", args.incremental),
+                               ("--digest", args.digest),
                                ("--all-sessions", args.all_sessions)) if on]
     if not actions:
         sys.exit("[x] 需要指定动作之一：--group / --user / --media / --list-groups / --list-contacts / "
-                 "--sns / --favorite / --biz / --transfer / --search / --incremental / --all-sessions")
+                 "--sns / --favorite / --biz / --transfer / --search / --incremental / "
+                 "--digest / --all-sessions")
     if len(actions) > 1:
         sys.exit(f"[x] 动作互斥，一次只做一个：{', '.join(actions)}")
 
@@ -466,6 +472,7 @@ def main():
     v23 = [a for a, on in (("--sns", args.sns), ("--favorite", args.favorite),
                            ("--biz", args.biz), ("--transfer", args.transfer),
                            ("--search", args.search), ("--incremental", args.incremental),
+                           ("--digest", args.digest),
                            ("--all-sessions", args.all_sessions)) if on]
     if v23:
         step(1, f"v2.3 模块：{v23[0]}（只读已解密缓存）")
@@ -507,6 +514,15 @@ def main():
             out_js = os.path.join(args.outdir, "全部会话汇总_底座.json")
             run([EXPORT_ALL_SESSIONS, "--dec", dec, "--out", out_md,
                  "--sqlite", out_db, "--json", out_js] + _time([]))
+        elif args.digest:
+            # v2.5：全天跨会话梳理包（群+私聊，逐会话文件+小时分节+引用/转账/红包细分+_总览）。
+            # 时间口径是 --date（不是 --since/--until/--last）；cap/merge-under 缺省值交给子脚本。
+            cmd = [EXPORT_DAY_DIGEST, "--dec", dec, "--date", args.digest]
+            if args.cap is not None:
+                cmd += ["--cap", str(args.cap)]
+            if args.merge_under is not None:
+                cmd += ["--merge-under", str(args.merge_under)]
+            run(cmd + ["--outdir", args.outdir])
         log(f"\n[√] 完成，输出目录: {args.outdir}")
         return
 

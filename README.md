@@ -34,6 +34,7 @@
 - **聊天统计台（v2.4）**：`chat_stats.py` 对指定群/私聊输出 Markdown 统计——消息总数（有效/系统两口径）、类型分布、发言排行 Top N、按小时/按日活跃分布、时间跨度
 - **群素材包（v2.4）**：`digest_source.py` 一键产出知识库素材包 `messages.json`（逐条摘要，截断 200 字）+ `stats.json`（同源统计）+ `material.md`（话题概述/发言排行/关键摘录），供下游群刊/AI 提炼消费
 - **跨全部会话批量导出（v2.4）**：`export_all_sessions.py` 一条命令跨全部群+私聊按时间窗（昨天/今天/近N天…）捞消息——「梳理昨天所有聊天记录给 AI 总结事项」。架构从消息出发：每个分库只开一次连接、每张 `Msg_` 表直接跑带 `create_time` 时间窗的 SQL，无命中会话自然 0 条、不逐个探测；产出按会话分组的 Markdown 汇总 + 可选 SQLite/JSON 结构化底座。本机 `--last 昨天`：1454 个真实会话、42 个有消息、3832 条约 15s
+- **全天跨会话梳理包（v2.5）**：`export_day_digest.py` 把某一天全部会话（群+私聊+文件传输助手）导成一套阅读包——`_总览.md` 统计+清单、大会话逐个一文件按小时分节、小会话可 `--merge-under` 合并成册；引用（带被引用人+摘录）、转账/红包（金额+备注）、小程序、文件均细分渲染。与 v2.4 汇总版互补（那边单文件+底座喂 AI，这边多文件给人读），同窗条数一致可交叉验证。md5 映射从 contact.db 全量构建，绝不拿 session.db 的 last_timestamp 剪枝（懒落盘会滞后，见 SKILL.md 踩坑#29）
 - **跨平台（v2.4 已落地为代码）**：同一套代码按 `sys.platform` 自动分支——AES 后端抽到 `scripts/aes_backend.py`（win=bcrypt / macOS=CommonCrypto CCCrypt / Linux=OpenSSL EVP），数据目录/找进程/内存读取/密钥提取全部三平台化。**Windows 行为逐字节不变、本机真跑回归；macOS/Linux 为代码级移植，未真机**。路线图见 `docs/CROSS_PLATFORM.md`、研究见 `docs/WCDB_KEY_TOOL_RESEARCH.md`。
 
 ## 环境要求
@@ -106,6 +107,11 @@ python chat_stats.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "群名" 
 python digest_source.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "群名" --outdir "D:/素材包" --last 30d
 python wx_export.py --all-sessions --last 昨天 --outdir "D:/导出"     # 跨全部会话按时间批量导出汇总（v2.4，一键入口）
 python export_all_sessions.py --dec "C:/Users/xxx/.wxcache/decrypted" --last 7d --out "汇总.md" --sqlite 底座.db --json 底座.json
+
+# 9. v2.5 全天跨会话梳理包（一天一梳：总览 + 逐会话文件按小时分节 + 小会话合集）
+python wx_export.py --digest yesterday --outdir "D:/导出/昨天"                      # 一键入口
+python wx_export.py --digest 2026-09-16 --outdir "D:/导出" --merge-under 100        # 指定日期；少于100条的会话并入合集
+python export_day_digest.py --dec "C:/Users/xxx/.wxcache/decrypted" --date yesterday --outdir "D:/导出"
 ```
 
 脚本遵循**程序与数据分离**：不写死任何机器路径。首次运行约 30s~8min（扫描内存提密钥），之后秒级。
@@ -135,6 +141,7 @@ wechat-group-export/
 │   ├── chat_stats.py            # 聊天统计台（v2.4：类型分布/发言排行/小时日活跃）
 │   ├── digest_source.py         # 群素材包（v2.4：messages.json + stats.json + material.md）
 │   ├── export_all_sessions.py   # 跨全部会话按时间批量导出（v2.4：Markdown 汇总 + SQLite/JSON 底座）
+│   ├── export_day_digest.py     # 全天跨会话梳理包（v2.5：总览 + 逐会话文件按小时分节 + 引用/转账/红包细分）
 │   ├── cnb_push.sh              # 推本仓到 CNB（自动注入正确 token + 绕开失效代理）
 │   └── wcdb_key_tool_windows.py # 密钥校验/解密函数（源自 TANGandXue/wcdb-key-tool，MIT）
 └── LICENSE

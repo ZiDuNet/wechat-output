@@ -70,7 +70,7 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | 需要 | 说明 |
 |---|---|
 | Python 3.10+ | 任意本机 Python（脚本零第三方依赖） |
-| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py`；**v2.4+ 新增**：统计分析台 `chat_stats.py`、群素材包 `digest_source.py`、跨全部会话批量导出 `export_all_sessions.py` |
+| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py`；**v2.4+ 新增**：统计分析台 `chat_stats.py`、群素材包 `digest_source.py`、跨全部会话批量导出 `export_all_sessions.py`；**v2.5+ 新增**：全天跨会话梳理包 `export_day_digest.py`（逐会话文件+小时分节+引用/转账/红包细分） |
 | `wcdb_key_tool_windows.py` | 密钥校验/解密函数来源（GitHub: TANGandXUE/wcdb-key-tool，MIT）。若本技能 scripts 未带，从该仓库取 |
 | zstandard（**实际必需**） | 解压压缩消息。`WCDB_CT_message_content=4` 或以 `\x28\xb5\x2f\xfd` 开头的消息都靠它。实测压缩占比很高（某读书群 161/201=**80%**、某时间管理群 496/1833=27%），**不装的话这些内容全变成 `[压缩未解]` 占位符**。1.8MB wheel，装隔离 venv |
 | sqlite3 / hashlib / ctypes | 全部标准库 |
@@ -94,6 +94,8 @@ DB="$OUT/wechat_stats.db"                 # ← 统计底座库（可选；diges
 "$PY" wx_export.py --list-groups         # 列出全部群名（秒级，用来确认群名）
 "$PY" wx_export.py --list-contacts       # 列出全部联系人（秒级）
 "$PY" wx_export.py --all-sessions --last 昨天 --outdir "$OUT"   # 跨全部会话按时间批量导出汇总（v2.4）
+"$PY" wx_export.py --digest yesterday --outdir "$OUT/昨天"     # 全天跨会话梳理包：总览+逐会话文件+小时分节（v2.5）
+"$PY" wx_export.py --digest 2026-09-16 --outdir "$OUT" --merge-under 100   # 指定日期；小会话并入合集
 "$PY" wx_export.py --purge               # 清缓存（密钥+解密库，敏感）
 ```
 
@@ -436,7 +438,7 @@ python scripts/export_incremental.py --dec "<dec>" --session "群名" --out "导
 
 > 两个纯增量脚本，都只读 `--dec` 指向的已解密库，**不改现有任何导出脚本**（`search_messages.py` 仅加 `--type`，其余行为不变）。
 > 发信人解析与分库合并逻辑直接复用 `export_group_md`（同目录 import），时间过滤统一走 `media_common`。
-> 本机实测：`Python百鸽笼` 群近 30 天 26790 条，chat_stats 加载 2~3s，digest_source 产出 messages.json 约 8.4MB。
+> 本机实测：某 Python 技术群近 30 天 26790 条，chat_stats 加载 2~3s，digest_source 产出 messages.json 约 8.4MB。
 
 ### 聊天统计台（chat_stats.py）
 
@@ -521,6 +523,43 @@ python scripts/export_all_sessions.py --dec "<dec>" --since 2026-09-01 --until 2
 结尾打印：枚举会话总数、有消息会话数、跳过会话数及样例、总消息数、逐分库扫描统计、耗时。
 
 > 本机实测（2026-09-17，`--last 昨天`）：枚举会话 1454（SessionTable 真实会话），时间窗内 42 个会话有消息、共 3832 条（有效 3785 / 系统 47），9 个分库仅 `message_1.db` 命中，耗时约 15s。抽样与 `export_group_md` 同窗口比对：某群 1556=1556、某私聊 49=49，条数一致（差 0）。
+
+
+## 全天跨会话梳理包（v2.5，export_day_digest.py）
+
+> 场景：「帮我梳理昨天的聊天」要的是**一天一梳的阅读包**——逐会话一个文件、按小时分节、
+> 引用/转账/红包/小程序细分渲染、一份总览带文件链接。与 `export_all_sessions.py`（v2.4）**互补**：
+> all-sessions 产出**单文件汇总 + SQLite/JSON 底座**（喂给程序/上层 AI 做事项总结）；
+> day-digest 产出**多文件梳理包**（直接给人读，或供 AI 逐会话细读）。
+> 两者同窗实测条数一致（42 会话 / 3832 条），可互为交叉验证。
+
+### 用法
+
+```bash
+# 一键入口（推荐，走 dec 缓存；--outdir 必填）
+python wx_export.py --digest yesterday --outdir "D:/导出/昨天"
+python wx_export.py --digest 2026-09-16 --outdir "D:/导出" --merge-under 100 --cap 200
+
+# 直接跑（调试）
+python scripts/export_day_digest.py --dec "<dec>" --date yesterday --outdir "D:/导出"
+```
+
+参数：`--date`（YYYY-MM-DD，或 today/今天、yesterday/昨天；**注意口径是 `--date`，不是 `--last`**）、
+`--cap`（单条截断，默认 150 字）、`--merge-under N`（少于 N 条的会话并入 `_其余会话合集.md`，默认关）、
+`--prune`（⚠️ 调试专用，见踩坑#29，正式数据勿用）。
+
+输出三件：
+
+| 产物 | 内容 |
+|---|---|
+| `_总览.md` | 总量/分类统计 + 会话清单（条数 + 文件链接） |
+| `NNN_<会话名>.md` | 大会话逐个一文件，按小时分节，头部带参与人数/发言最多 |
+| `_其余会话合集.md` | `--merge-under N` 时小会话合并成册 |
+
+分类桶：文本/媒体/引用/链接文件/小程序/转账红包/系统/其他——引用带被引用人+内容摘录
+（refermsg displayname+content），转账/红包带金额与备注（wcpayinfo，wctype 2000/2001），
+小程序带标题（weappinfo / `<type>` 33/36）。md5→username 映射从 contact.db 全量构建
+（不硬编码），映射外的孤儿分表计数上报不静默丢弃。
 
 
 ## 跨平台（macOS / Linux，v2.4 已落地为代码）
@@ -649,6 +688,23 @@ sudo python3 scripts/extract_keys_linux.py extract      # 首次需退出重登�
 
 22. **「天数」口径不统一会跨技能差 1（digest 群刊实战发现）**：导出完整性日志用 `(t1-t0)/86400`（差值天，不含首尾），群刊页面用 `date 差 +1`（含首尾的覆盖天）——同一群一个报 42 天一个报 43 天，用户对账必懵。**统一口径：跨度天数 = 含首尾覆盖天（秒差/86400 + 1，或 date 差 +1）**，页面与日志永远同数。教训：跨脚本/跨技能的"同义数字"要同源定义，发现差 1 先查口径而非数据。
 
+29. **SessionTable 懒落盘，last_timestamp 会滞后（跨会话按天导出曾静默丢 4 会话/633 条）**：
+    `session.db` 的 `SessionTable`（⚠️ 表名不是 `session`，猜错直接 `no such table`）记录每个会话的
+    `last_timestamp`，但它是**懒落盘**的——实测某群消息库已写到 09-17 00:46，SessionTable 里
+    last 还停在 09-15 23:18。拿它当"今天/昨天有没有新消息"的**剪枝依据会静默剪掉整天消息**
+    （实测全扫 42 会话/3832 条 vs 剪枝 38/3199，不报错不警告）。
+    - **正解**：跨会话按时间捞消息一律**全扫 `Msg_%` 分表 + SQL WHERE 时间窗**（`Msg_` 表无
+      `create_time` 索引，过滤必须放 SQL 里，逐行 Python 判会慢死；11 库全扫实测 ~15s，可接受）。
+      `SessionTable` 只许做"会话总数枚举/命名参考"，**绝不用于驱动查询或剪枝**。
+      `export_day_digest.py` 的 `--prune` 仅留作调试开关并全程红字警告。
+    - **同场加映两个小坑**（同一次开发踩到）：
+      ① appmsg 的 `<type>` 子类型**不能锚定开头提取**——XML 里 `<title>` 排在 `<type>` 之前，
+      `re.match(r"<type>")` 永远空手，必须 `re.search(r"<type>(\d+)</type>")` 任意位置；
+      ② `244813135921`（57<<32|49）是**引用**复合类型，必须落 49 富文本分支解析 refermsg，
+      绝不能跟拍一拍（266287972401）一起进系统桶——按整值特判时两类大数要分开。
+    - **回归方式**：同窗双跑 `--digest` 与 `--all-sessions --last` 对总数；再比对单群
+      `export_group_md` 抽样条数（本次三方一致：42/3832）。
+
 ## 验证方式（改脚本后必跑）
 
 ```bash
@@ -675,6 +731,7 @@ python extract_keys_413.py --db-dir "...\db_storage" \
 | 语音导出日志 `语音消息 N，VoiceInfo 命中 H（未命中 M），WAV W` | 命中率应 ~99%+（未命中为过期/撤回）；WAV 用播放器抽查，RIFF/WAVE 头完整（踩坑#28） |
 | 语音时间线 | `语音时间线.csv` 与 `voice_map.json` 已生成；Markdown 导出带 `--voice-map` 时 `[语音]` 行有 🎤 WAV 路径，且与行首时间同源 |
 | 抽查解密图片 | 随机挑一张用看图工具打开，应为正常照片（非乱码/黑块） |
+| 全天梳理包 `--digest`（v2.5） | 日志 `会话 N 个 / 消息 M 条` 与 `--all-sessions --last <同日>` 总数一致（互为交叉验证）；`_总览.md` 分类桶之和 = M；日志应为"剪枝 0"（出现剪枝 N>0 说明误开了 `--prune`，⚠️ 可能漏数据，见踩坑#29） |
 
 ## 产出与收尾
 
