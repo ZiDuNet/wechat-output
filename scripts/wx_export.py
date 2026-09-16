@@ -42,6 +42,8 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 EXTRACT = os.path.join(HERE, "extract_keys_413.py")
 DECRYPT = os.path.join(HERE, "wcdb_key_tool_windows.py")
 EXPORT = os.path.join(HERE, "export_group_md.py")
+EXTRACT_IMG = os.path.join(HERE, "extract_image_key.py")
+EXPORT_MEDIA = os.path.join(HERE, "export_media.py")
 
 # 缓存默认位置（敏感：含解密库+密钥），用 --cache 可改。
 # 发布版默认用户主目录（跨机器恒存在）；作者/团队可用 --cache 指向私有缓存。
@@ -186,6 +188,48 @@ def resolve_group(dec, keyword):
         sys.exit(1)
     return cands[0]
 
+def list_contacts(dec, with_groups=False):
+    """联系人列表（默认只列私聊对象；with_groups=True 时含群）。"""
+    cdb = None
+    for root, _d, files in os.walk(dec):
+        if "contact.db" in files:
+            cdb = os.path.join(root, "contact.db")
+            break
+    if not cdb:
+        sys.exit("[x] 找不到 contact.db")
+    conn = sqlite3.connect(cdb)
+    conn.row_factory = sqlite3.Row
+    if with_groups:
+        rows = conn.execute(
+            "SELECT username, nick_name, remark FROM contact WHERE username != ''"
+        ).fetchall()
+    else:
+        rows = conn.execute(
+            "SELECT username, nick_name, remark FROM contact "
+            "WHERE username != '' AND username NOT LIKE '%@chatroom' AND username NOT LIKE '%@openim'"
+        ).fetchall()
+    conn.close()
+    return rows
+
+
+def resolve_contact(dec, keyword):
+    """按昵称/备注定位私聊联系人（绝不把群当私聊；群名撞上时明确排除）。"""
+    rows = list_contacts(dec)
+    kw = keyword.strip()
+    exact = [r for r in rows if (r["remark"] or "") == kw or (r["nick_name"] or "") == kw]
+    if len(exact) == 1:
+        return exact[0]
+    cands = [r for r in rows if kw in (r["remark"] or "") or kw in (r["nick_name"] or "")]
+    if not cands:
+        sys.exit(f"[x] 没有昵称/备注包含「{kw}」的联系人。用 --list-contacts 看看有哪些联系人。")
+    if len(cands) > 1:
+        log(f"[!] 「{kw}」匹配到 {len(cands)} 个联系人，请确认后用更完整的名称重跑：")
+        for r in cands:
+            nm = r["remark"] or r["nick_name"] or r["username"]
+            log(f"    - {nm}   (username: {r['username']})")
+        sys.exit(1)
+    return cands[0]
+
 
 # ---------------------------------------------------------------- 主流程
 
@@ -193,6 +237,11 @@ def resolve_group(dec, keyword):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--group", help="群名（支持片段，唯一匹配即可）")
+    ap.add_argument("--user", help="私聊联系人昵称/备注（支持片段，唯一匹配即可）")
+    ap.add_argument("--media", metavar="会话名|all",
+                    help="导出媒体（图片解密+WXGF转码；指定会话名或 all 全部）")
+    ap.add_argument("--media-video", action="store_true",
+                    help="配合 --media：同时复制视频（明文 mp4 直拷）")
     ap.add_argument("--out", help="输出 Markdown 路径（默认 <outdir>/<群名>_聊天记录.md）")
     ap.add_argument("--outdir", default=DEFAULT_OUTDIR,
                     help="输出目录（不设 --out 时导出文件放这里；必填，默认无）")
@@ -200,6 +249,7 @@ def main():
                     help="缓存目录（密钥+解密库，敏感；默认 ~/.wxcache）")
     ap.add_argument("--db-dir", help="手动指定 db_storage（跳过自动探测）")
     ap.add_argument("--list-groups", action="store_true", help="只列出所有群名后退出")
+    ap.add_argument("--list-contacts", action="store_true", help="只列出所有联系人后退出")
     ap.add_argument("--purge", action="store_true", help="删除缓存（密钥+解密库，敏感；需配 --yes 确认）")
     ap.add_argument("--yes", action="store_true", help="配合 --purge 跳过删除确认")
     ap.add_argument("--sqlite", help="结构化输出 SQLite 路径（统计底座，可选）")
@@ -216,21 +266,34 @@ def main():
             log(f"[i] 缓存不存在: {args.cache}")
         return
 
+    # 动作互斥：群 / 私聊 / 媒体 / 列表 必须选一个且互不混用
+    actions = [a for a, on in (("--group", args.group), ("--user", args.user),
+                               ("--media", args.media), ("--list-groups", args.list_groups),
+                               ("--list-contacts", args.list_contacts)) if on]
+    if not actions:
+        sys.exit("[x] 需要指定动作之一：--group / --user / --media / --list-groups / --list-contacts")
+    if len(actions) > 1:
+        sys.exit(f"[x] 动作互斥，一次只做一个：{', '.join(actions)}")
+
     # 未指定输出位置时起步即拒（不再白跑 6 分钟内存扫描后才拒绝）
-    if not args.list_groups and args.group and not args.out and not args.outdir:
+    needs_out = args.group or args.user
+    if needs_out and not args.out and not args.outdir:
         sys.exit("[x] 未指定导出位置：请用 --outdir 指定输出目录，或用 --out 指定文件路径。\n"
                  "    例: wx_export.py --group \"群名\" --outdir \"D:\\导出\"")
+    if args.media and not args.outdir:
+        sys.exit("[x] --media 需要 --outdir 指定媒体输出目录。\n"
+                 "    例: wx_export.py --media all --outdir \"D:\\媒体导出\"")
 
     # 启动预检（人人可用）：缓存/输出目录所在盘符不存在时（os.makedirs 抛 WinError 3），
     # 把"中途崩"变成"起步时给清晰指引"。
-    for label, p in (("--cache", args.cache),
-                     ("--outdir", args.outdir),
-                     ("--out", args.out)):
-        if not p:
+    for label, pp in (("--cache", args.cache),
+                      ("--outdir", args.outdir),
+                      ("--out", args.out)):
+        if not pp:
             continue
-        drive = os.path.splitdrive(os.path.abspath(p))[0]
+        drive = os.path.splitdrive(os.path.abspath(pp))[0]
         if drive and not os.path.isdir(drive + os.sep):
-            sys.exit(f"[x] {label} 所在盘符不存在: {p}\n"
+            sys.exit(f"[x] {label} 所在盘符不存在: {pp}\n"
                      f"    请显式指定，例如: wx_export.py --group \"群名\" {label} D:\\某目录")
 
     keys = os.path.join(args.cache, "all_keys.json")
@@ -266,6 +329,29 @@ def main():
                      "    处置: wx_export.py --purge --yes 清缓存重跑，或用 --cache 指定独立目录")
     with open(meta_path, "w", encoding="utf-8") as mf:
         json.dump({"db_dir": os.path.abspath(db_dir)}, mf)
+
+    # ---- 媒体导出（只需图片密钥 + 账号目录，不需要数据库密钥/解密库）
+    if args.media:
+        step(1, "提取图片密钥（读微信进程内存，需微信运行中；自动派生，无需打开图片）")
+        media_keys = os.path.join(args.cache, "media_keys.json")
+        account_dir = os.path.dirname(os.path.abspath(db_dir))
+        if os.path.isfile(media_keys):
+            log(f"  [→] 复用图片密钥缓存: {media_keys}")
+        else:
+            run([EXTRACT_IMG, "--account-dir", account_dir, "--out", media_keys])
+            if not os.path.isfile(media_keys):
+                sys.exit("[x] 图片密钥提取失败（微信是否在运行/已登录？）")
+        step(2, "导出媒体")
+        cmd = [EXPORT_MEDIA, "--account-dir", account_dir,
+               "--keys", media_keys, "--out", args.outdir]
+        if args.media != "all":
+            cmd += ["--session", args.media]
+        if args.media_video:
+            cmd += ["--video"]
+        if os.path.isdir(dec):
+            cmd += ["--dec", dec]  # 会话名映射（有解密库时更友好）
+        run(cmd)
+        return
 
     # ---- Step 1 密钥（有缓存就跳过）
     step(1, "提取数据库密钥（读微信进程内存，需微信运行中）")
@@ -316,7 +402,7 @@ def main():
             log(f"  [i] 解密库有 {len(resid)} 个文件名与源不一致（不影响使用，按数量口径放行）")
     log(f"  [√] 解密库就绪: {dec}  ({len(db_file_set(dec))}/{n_src})")
 
-    # ---- 列群
+    # ---- 列群 / 列联系人
     if args.list_groups:
         step(3, "群列表")
         rows = list_groups(dec)
@@ -325,25 +411,36 @@ def main():
             nm = r["nick_name"] or "(无昵称)"
             log(f"  - {nm}")
         return
+    if args.list_contacts:
+        step(3, "联系人列表")
+        rows = list_contacts(dec)
+        log(f"共 {len(rows)} 个联系人：\n")
+        for r in rows:
+            nm = r["remark"] or r["nick_name"] or r["username"]
+            log(f"  - {nm}")
+        return
 
-    if not args.group:
-        sys.exit("[x] 需要 --group 群名（或用 --list-groups 查看）")
-
-    # ---- Step 3 解析群（消歧）
-    step(3, "定位群聊")
-    g = resolve_group(dec, args.group)
-    gname = g["nick_name"] or g["username"]
-    log(f"  [√] 目标群: {gname}   ({g['username']})")
+    # ---- Step 3 解析对象（群或私聊，各自消歧）
+    if args.group:
+        step(3, "定位群聊")
+        g = resolve_group(dec, args.group)
+        uname, gname = g["username"], (g["nick_name"] or g["username"])
+        log(f"  [√] 目标群: {gname}   ({uname})")
+    else:
+        step(3, "定位联系人（私聊）")
+        c = resolve_contact(dec, args.user)
+        uname = c["username"]
+        gname = c["remark"] or c["nick_name"] or c["username"]
+        log(f"  [√] 目标联系人: {gname}   ({uname})")
 
     # ---- Step 4 导出 Markdown
     step(4, "导出 Markdown")
     # 文件名安全化：替换 Windows 非法字符后，把残留的 " _ " 收干净
-    # （否则 "示例群A | 分群名" 会变成 "示例群A _ 分群名"）
     safe = re.sub(r'[\\/:*?"<>|]', "_", gname)
     safe = re.sub(r"\s*_\s*", "_", safe)
     out = args.out or os.path.join(args.outdir, safe + "_聊天记录.md")
     # 用 --username 精确定位（上游已消歧），下游不再做模糊匹配 —— 杜绝二次误配
-    cmd = [EXPORT, "--dec", dec, "--username", g["username"], "--out", out]
+    cmd = [EXPORT, "--dec", dec, "--username", uname, "--out", out]
     if args.sqlite:
         cmd += ["--sqlite", args.sqlite]
     try:

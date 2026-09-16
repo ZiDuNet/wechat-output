@@ -1,9 +1,9 @@
 ---
 name: wechat-group-export
-description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密钥破解）本地加密数据库提取密钥、解密，并把指定群聊导出为 Markdown。零第三方依赖即可完成提取+解密；解压富文本消息需 zstandard（1.8MB wheel）。触发词：导出微信群聊、微信聊天记录、微信解密、群聊备份、微信数据库。
+description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密钥破解）本地加密数据库提取密钥、解密，导出指定群聊/私聊为 Markdown，并解密导出图片/视频等媒体。数据库密钥与图片密钥均从进程内存自动提取（图片密钥由登录态 code 派生，全自动，无需打开图片）。零第三方依赖；解压富文本消息需 zstandard（1.8MB wheel）。触发词：导出微信群聊、微信聊天记录、微信解密、群聊备份、私聊导出、微信图片导出、微信媒体导出、微信数据库。
 ---
 
-# 微信群聊导出全流程（Windows / 微信 4.1.13 实测）
+# 微信聊天记录导出全流程（群聊 / 私聊 / 媒体，Windows / 微信 4.1.13 实测）
 
 > 实测环境（2026-09-08）：Windows + 绿色版微信 4.1.13.63，数据目录由脚本自动探测（绿色/便携版在安装目录旁、安装版在 %APPDATA%），非管理员权限，零安装完成提取+解密+导出 23/23 库、3218 条群消息。
 > 微信版本演进可能使本方法失效；失效时**先读下方「微信机制·不变量」判断卡在哪一层**（不变量版本无关，变的只是细节），再按「踩坑实录」末尾的失效排查顺序查对应细节。
@@ -11,7 +11,7 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 ## 红线（先读）
 
 1. **只读**：全程不修改微信任何文件/进程，只读它的进程内存和本地库。不做批量采集、不碰别人账号。
-2. **密钥敏感**：`all_keys.json`、解密库是敏感数据，只放沙盒/用户显式目录，绝不进 git、不上传。
+2. **密钥敏感**：`all_keys.json`（数据库密钥）、`media_keys.json`（图片密钥）、解密库是敏感数据，只放沙盒/用户显式目录，绝不进 git、不上传。
 3. **首次运行前必须获得用户明确同意**（涉及读取微信进程内存，用户可能担心账号风控）。
 4. 解密产物放沙盒（`<session>\.sandbox-<task>\`），只有最终导出的 Markdown 放用户指定目录。
 
@@ -64,7 +64,7 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | 需要 | 说明 |
 |---|---|
 | Python 3.10+ | 任意本机 Python（脚本零第三方依赖） |
-| 本技能 `scripts/` 两个脚本 | `extract_keys_413.py`（密钥提取+破解）、`export_group_md.py`（导出） |
+| 本技能 `scripts/` 五个脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（媒体解密共享库） |
 | `wcdb_key_tool_windows.py` | 密钥校验/解密函数来源（GitHub: TANGandXUE/wcdb-key-tool，MIT）。若本技能 scripts 未带，从该仓库取 |
 | zstandard（**实际必需**） | 解压压缩消息。`WCDB_CT_message_content=4` 或以 `\x28\xb5\x2f\xfd` 开头的消息都靠它。实测压缩占比很高（某读书群 161/201=**80%**、某时间管理群 496/1833=27%），**不装的话这些内容全变成 `[压缩未解]` 占位符**。1.8MB wheel，装隔离 venv |
 | sqlite3 / hashlib / ctypes | 全部标准库 |
@@ -81,9 +81,12 @@ cd "<技能目录>/scripts"
 OUT="D:/微信群导出"                       # ← 改成你自己的导出目录（必填）
 DB="$OUT/wechat_stats.db"                 # ← 统计底座库（可选；digest 技能要用同路径）
 
-"$PY" wx_export.py --group "群名" --outdir "$OUT"                  # 导出（全自动）
-"$PY" wx_export.py --group "群名" --outdir "$OUT" --sqlite "$DB"   # 同时写统计底座库
+"$PY" wx_export.py --group "群名" --outdir "$OUT"                  # 导出群聊（全自动）
+"$PY" wx_export.py --user "联系人备注" --outdir "$OUT"            # 导出私聊
+"$PY" wx_export.py --media all --outdir "$OUT/媒体"                # 导出全部图片（自动提密钥+解密）
+"$PY" wx_export.py --media "联系人" --media-video --outdir "$OUT/媒体"  # 导出某人图片+视频
 "$PY" wx_export.py --list-groups         # 列出全部群名（秒级，用来确认群名）
+"$PY" wx_export.py --list-contacts       # 列出全部联系人（秒级）
 "$PY" wx_export.py --purge               # 清缓存（密钥+解密库，敏感）
 ```
 
@@ -184,6 +187,56 @@ python -m pip install zstandard
 # 重跑 Step 3 加 --with-zstd
 ```
 
+
+## 媒体导出（图片 / 视频，v2.0 新增）
+
+> 实测（2026-09-17）：#[MOTHER] 私聊媒体 1758 张图片全部解密成功（失败 0），另复制视频 130 个，
+> 全程约 10s。图片密钥**全自动提取**——扫微信进程内存里的登录态整数 code（常驻，实测数百处副本），
+> 用 `md5(code+wxid)` 派生 AES 密钥，模板密文验证通过即采信，**无需用户打开图片**。
+
+### 图片存储与格式
+
+| 位置 | 说明 |
+|---|---|
+| `msg/attach/<会话hash>/<YYYY-MM>/Img/<md5>.dat` | 图片缓存。V2 加密格式：`070856320807` + aes_size + xor_size + pad → AES 区(ECB+PKCS7) + 明文区 + XOR 区 |
+| `msg/video/` | 视频为**明文 mp4**，直接复制即可，无需解密 |
+| 语音 | **本地不落盘**（仅存 CDN 引用），本工具不导出语音 |
+
+### 图片密钥派生（账号级固定，微信版本无关的数学规律）
+
+- `aes_key = md5(f"{code}{wxid}")[:16]`（16 字符 ASCII，当 16 字节 AES key）
+- `xor_key = code & 0xFF`
+- **code 是登录态整数（uin 类），常驻微信进程内存**：直接扫 4 字节 LE 窗口（低字节 = XOR 预过滤），
+  逐候选派生密钥并用 V2 模板密文（首个 AES 块）验证 → 命中即永久保存 `media_keys.json`
+- **wxid 用短名**（去掉 `_设备后缀`，如 `wxid_xxx_8bb3` → `wxid_xxx`）——实测派生用的是短名，
+  脚本会自动尝试两种形态
+- 密钥不随微信重启变化（code 由账号决定），`media_keys.json` 可长期复用；换账号才需重提
+
+### 格式与转码
+
+- 直接解密可得到 jpg / png / webp / gif
+- **WXGF**（微信自研容器，本地只有缩略图缓存）：解密后仍为 wxgf，需用微信自带
+  `VoipEngine.dll` 的 `wxam_dec_wxam2pic_5` 转码为 jpg（自动从微信安装目录探测 DLL，
+  实测 107 张转码全成功，82KB 缩略图 → 929KB 完整原图）
+
+### 媒体导出用法（Step 3'，独立于数据库解密）
+
+```bash
+# wx_export 集成（推荐）：自动提图片密钥（缓存复用）+ 导出
+python wx_export.py --media "联系人/群名" --media-video --outdir "D:/媒体导出"
+python wx_export.py --media all --outdir "D:/媒体导出"          # 全部会话
+
+# 单独跑（调试用）
+python extract_image_key.py --account-dir "D:/微信数据/xwechat_files/<wxid>" --out "media_keys.json"
+python export_media.py --account-dir "D:/微信数据/xwechat_files/<wxid>" \
+    --keys "media_keys.json" --out "D:/媒体导出" --session "联系人" --video
+```
+
+- 媒体导出**不需要数据库密钥/解密库**（图片密钥独立于 DB 密钥）；但给 `--dec` 解密库时
+  会把会话 hash 目录映射成可读名称（#[MOTHER] 而非 32 位 hash）
+- 输出结构：`<out>/图片/<会话名或hash>/<月份>_<md5>[_t].jpg`；WXGF 转码的完整原图去掉 `_t` 后缀
+- 首次约 10~30s（扫内存提 code + 解密），之后复用 `media_keys.json` 秒级完成
+
 ## 踩坑实录（按遇到顺序）
 
 1. **`pip install wechat-cli` 是假的**：PyPI（含清华镜像）无此包（`from versions: none`），疑似已下架。技能文档里的安装指令不可信，上层 `sessions/history/export` 命令全是空中楼阁——一切靠自带脚本 + 自写导出。
@@ -234,6 +287,27 @@ python -m pip install zstandard
 
 21. **SQL UNIQUE 去重键比消息身份粗，会静默丢消息（结构化输出首版踩到，实测丢 18/22217）**：给 messages 表加 `UNIQUE(room_id, ts, sender, local_type, content)` 防"重复导出翻倍"，但系统消息常出现**同秒、同人、同内容**（连续几条"[系统]"），被当成重复 `INSERT OR IGNORE` 掉——不报错、总数对不上才发现。**正解：放弃 UNIQUE，改"整群重写"（DELETE 该群再 INSERT）**——天然幂等、零误删。教训：**去重键必须精确到消息身份；身份不唯一的场景，用"替换式写入"而不是"忽略式写入"**。验证手段：入库总数必须与解析总数逐次相等（22217=22217），重跑一次数不变。
 
+23. **图片密钥 ≠ 数据库密钥，且可由登录态 code 派生（媒体解密核心突破）**：V2 图片的 AES 密钥不是
+    从 Config.Cipher 对象拿（那是 DB 密钥），而是 `md5(code+wxid)[:16]`，xor = code & 0xFF。
+    code 是账号级登录态整数，**常驻微信进程内存**（实测主进程数百处 4 字节副本）——直接扫
+    4 字节 LE 窗口（低字节 == 从 JPEG 尾部 `FF D9` 推断的 XOR 预过滤，1/256 提速 ~200 倍），
+    逐候选派生 + 模板密文 AES 验证即命中。**这是"初始化全自动"的关键**：无需用户打开图片。
+    - 踩坑子项：**不能只取出现次数最多的候选**（内存里低字节匹配的无关整数更多，实测
+      566534 个候选中真实 code 排在第 8 位左右）；必须按次数降序逐个派生验证，上限 5 万。
+    - 验证 oracle：V2 文件头部首个 AES 块解密后应为 jpg/png 头。没有模板就什么都验不了，
+      所以先扫 `attach/*/*/Img/*.dat` 找模板（模板要 `_t.dat` 缩略图，普通 `.dat` 可能是 V1）。
+24. **wxid 派生用短名（去掉设备后缀）**：账号目录名形如 `wxid_xxx_8bb3`，但密钥派生用的
+    wxid 是 `wxid_xxx`（无 `_8bb3`）。脚本自动尝试两种形态，用模板验证选出正确者。
+    别硬编码目录名当派生输入。
+25. **V2 头部是 15 字节不是 16**：`070856320807`(6B) + aes_size(LE u32) + xor_size(LE u32) + pad(1B)。
+    aes_size 需对齐到 16 的倍数才是 AES 区长度；PKCS7 unpad 失败（非 PKCS7 填充）时原样保留尾部。
+26. **WXGF 转码必须用微信自带的 VoipEngine.dll**：`wxam_dec_wxam2pic_5` 导出函数，mode 0/3 循环，
+    输出上限 52MB。DLL 从运行中 Weixin.exe 的安装目录递归探测（不写死路径）。找不到 DLL 时
+    WXGF 文件转码失败——提示安装微信即可，不是解密逻辑问题。
+27. **PowerShell 通配符坑（纯排查误导）**：目录名含 `[`（如 `#[MOTHER]`）时
+    `Get-ChildItem -Directory | % FullName` 显示 0 个文件，是 `[` 被当通配符，文件其实都在。
+    用 Python os.listdir 复查，别据此误判导出失败。
+
 22. **「天数」口径不统一会跨技能差 1（digest 群刊实战发现）**：导出完整性日志用 `(t1-t0)/86400`（差值天，不含首尾），群刊页面用 `date 差 +1`（含首尾的覆盖天）——同一群一个报 42 天一个报 43 天，用户对账必懵。**统一口径：跨度天数 = 含首尾覆盖天（秒差/86400 + 1，或 date 差 +1）**，页面与日志永远同数。教训：跨脚本/跨技能的"同义数字"要同源定义，发现差 1 先查口径而非数据。
 
 ## 验证方式（改脚本后必跑）
@@ -258,6 +332,8 @@ python extract_keys_413.py --db-dir "...\db_storage" \
 | `成员核验: 发送者 X 人中 Y 人在本群成员名单` | 名单外多为已退群成员（正常）；**过半**不在名单 → 发信人映射有问题（踩坑#20） |
 | `消息口径对账: 共 N 条 = 有效 X + 系统 Y` | `X` 应等于统计底座 `groups.msg_count`，也等于群刊展示的「有效消息」数；三者不一致先查这行（差值是系统/撤回/拍一拍） |
 | 导出 MD 的消息类型标签 | 已知类型（文本/图片/语音/视频/表情/位置/链接/系统/撤回/拍一拍/复合/名片等）显示中文；未知类型统一显示「应用消息」或「微信消息」，**不再出现 `类型{数字}` 裸码**（审计 F 补全） |
+| 媒体导出日志 `成功 N/M（失败 X，WXGF 转码 Y）` | 失败应为 0；WXGF 失败需检查 VoipEngine.dll 是否存在（踩坑#26） |
+| 抽查解密图片 | 随机挑一张用看图工具打开，应为正常照片（非乱码/黑块） |
 
 ## 产出与收尾
 
