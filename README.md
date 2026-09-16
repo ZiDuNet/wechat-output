@@ -15,6 +15,7 @@
 - **私聊导出**：`--user "备注/昵称"` 导出任意联系人的完整聊天记录（与群聊同源的解析/去重/发信人校验逻辑）
 - **媒体导出（v2.0 新增）**：`--media "会话名|all"` 解密导出图片（V2 格式 AES+XOR 解密、WXGF 容器自动转码为完整原图），`--media-video` 顺带复制视频（明文 mp4）
 - **语音导出（v2.1 新增，全 Python 原生）**：`export_voice.py` 从 `media_*.db` 的 `VoiceInfo` 表提取语音（SILK v3 BLOB，不落文件系统），用 `pysilk`（pip 安装的 Python 库）解码为 24kHz WAV——零 exe、零微信 DLL、零第三方服务，转文字留可插拔后端接口
+- **语音可回溯到聊天时间线**：WAV 文件名自带秒级消息时间；每会话输出 `语音时间线.csv`；全局 `voice_map.json` 供 Markdown 导出 `--voice-map`，聊天记录里 `[语音] 🎤 <wav路径>` 直接对应当天该时刻的语音
 - **图片密钥全自动提取**：扫微信进程内存中的登录态整数 code（常驻，无需用户操作）→ 派生 AES 密钥 → 模板验证 → 保存复用。实测 #[MOTHER] 私聊 1758 张图片 10 秒内全部解密成功
 
 ## 环境要求
@@ -52,8 +53,11 @@ python wx_export.py --user "联系人备注" --outdir "D:/微信群导出"
 python wx_export.py --media all --outdir "D:/媒体导出"
 python wx_export.py --media "联系人" --media-video --outdir "D:/媒体导出"
 
-# 4. 导出语音为 WAV（可选：pip install silk-python）
+# 4. 导出语音为 WAV（可选：pip install silk-python；产出语音时间线.csv + voice_map.json）
 python export_voice.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "联系人" --out "D:/语音导出"
+
+# 4b. 聊天记录 Markdown 嵌入语音（语音消息行自动带上 WAV 路径，可追溯聊天时间）
+python export_group_md.py --dec "C:/Users/xxx/.wxcache/decrypted" --username "wxid_xxx"     --out "D:/导出/私聊.md" --voice-map "D:/语音导出/语音/voice_map.json"
 
 # 5. 顺带产出统计底座库（wechat-group-digest 的前置数据）
 python wx_export.py --group "群名" --outdir "D:/微信群导出" \

@@ -131,9 +131,20 @@ def main():
     ap.add_argument("--out", required=True, help="输出 Markdown 路径")
     ap.add_argument("--with-zstd", action="store_true", help="解压富文本(需 zstandard)")
     ap.add_argument("--sqlite", help="结构化输出 SQLite 路径（统计底座：群/成员/消息三张表）")
+    ap.add_argument("--voice-map", help="语音时间线映射（export_voice.py 输出的 voice_map.json）："
+                                        "把 [语音] 消息行嵌上对应 WAV 路径，可追溯到聊天时间")
     args = ap.parse_args()
     if not args.username and not args.group:
         sys.exit("[x] 需要 --group 群名关键词，或 --username 精确群 ID")
+
+    voice_map = {}
+    if args.voice_map:
+        import json as _json
+        if not os.path.isfile(args.voice_map):
+            sys.exit(f"[x] voice-map 文件不存在: {args.voice_map}")
+        with open(args.voice_map, encoding="utf-8") as f:
+            voice_map = _json.load(f)
+        print(f"[i] 语音时间线映射已加载: {sum(len(v) for v in voice_map.values())} 条")
 
     contact_db = find_file(args.dec, "contact.db")
     if not contact_db:
@@ -321,6 +332,11 @@ def main():
         if mt in (10000, 10002) or mt == 266287972401:
             lines.append(f"- `{t}` 系统: {text[:160]}")
         else:
+            # 语音消息嵌入 WAV 路径（--voice-map）：同一时间源 create_time，可直接对应聊天时间
+            if mt == 34 and voice_map:
+                v = voice_map.get(md5, {}).get(str(r.get("server_id") or ""))
+                if v:
+                    text = f"{text} 🎤 {v['wav']}" if text != "[语音]" else f"[语音] 🎤 {v['wav']}"
             lines.append(f"- `{t}` **{who}**: {text}")
 
     # ---- 完整性自检2：发信人应属于本群成员名单（防"张冠李戴"复发，踩坑#20）

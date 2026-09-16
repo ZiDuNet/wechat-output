@@ -19,12 +19,17 @@
 
 输出:
     <out>/语音/<会话名或hash>/<日期>_<时间>_<序号>_<发信人>.wav
+    <out>/语音/<会话名或hash>/语音时间线.csv         每会话时间线索引（与聊天记录同一时间源）
+    <out>/语音/voice_map.json                       全局映射（svr_id->WAV），供 Markdown 导出
+                                                    --voice-map 把语音嵌回聊天记录时间线
 
 依赖:
     pip install silk-python     （--voice 时懒加载，缺失时提示安装）
 """
 import argparse
+import csv
 import hashlib
+import json
 import os
 import sqlite3
 import struct
@@ -244,6 +249,7 @@ def main():
     out_voice = os.path.join(args.out, "语音")
     os.makedirs(out_voice, exist_ok=True)
     stats = {"msg": 0, "hit": 0, "miss": 0, "wav": 0, "fail": 0, "decode_fail": 0}
+    voice_map = {}   # {会话hash: {svr_id: {wav/ts/time/who/username/session}}}，供 Markdown 时间线嵌入
     for tbl in target_tables:
         h = tbl[4:]  # 去掉 Msg_ 前缀
         sname = None
@@ -292,9 +298,36 @@ def main():
             out_path = os.path.join(sdir, f"{ts}_{i:03d}_{who}.wav")
             if silk_to_wav(data, out_path):
                 stats["wav"] += 1
+                # 时间线映射（聊天时间 = 消息表 create_time，与导出的 Markdown 同一时间源）
+                voice_map.setdefault(h, {})[str(svr_id)] = {
+                    "wav": os.path.relpath(out_path, args.out).replace("\\", "/"),
+                    "ts": ct,
+                    "time": datetime.fromtimestamp(ct).strftime("%Y-%m-%d %H:%M:%S"),
+                    "who": who, "username": who_u or "", "session": sname}
             else:
                 stats["decode_fail"] += 1
+
+        # 每会话时间线 CSV（可直接按时间对齐聊天记录）
+        if voice_map.get(h):
+            csv_path = os.path.join(sdir, "语音时间线.csv")
+            with open(csv_path, "w", encoding="utf-8-sig", newline="") as f:
+                w = csv.writer(f)
+                w.writerow(["序号", "聊天时间", "聊天记录显示时间(HH:MM)",
+                            "发信人", "username", "svr_id", "WAV文件(相对导出根)"])
+                for n, (svr_id, info) in enumerate(
+                        sorted(voice_map[h].items(), key=lambda kv: kv[1]["ts"]), 1):
+                    w.writerow([n, info["time"], info["time"][11:16],
+                                info["who"], info["username"], svr_id, info["wav"]])
         log(f"  [√] {sname}: 语音 {len(uniq)} 条 -> WAV {stats['wav']}（累计）")
+
+    # 全局映射：供 export_group_md.py --voice-map 把 WAV 嵌回聊天记录时间线
+    if voice_map:
+        map_path = os.path.join(out_voice, "voice_map.json")
+        with open(map_path, "w", encoding="utf-8") as f:
+            json.dump(voice_map, f, ensure_ascii=False, indent=1)
+        log(f"  [√] 时间线映射: {os.path.relpath(map_path, args.out)}"
+            f"（{sum(len(v) for v in voice_map.values())} 条语音，"
+            f"供 Markdown 导出 --voice-map 使用）")
 
     log(f"\n[√] 完成: {args.out}")
     log(f"  统计: 语音消息 {stats['msg']}，VoiceInfo 命中 {stats['hit']}"

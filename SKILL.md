@@ -262,6 +262,19 @@ python export_voice.py --dec "<解密库目录>" --out "D:/语音导出" --limit
 - 发信人 = 消息所在库 `Name2Id`（rid→username，局部于库，踩坑#20 同源逻辑）→ contact 备注/昵称
 - 转文字（whisper / 云 API）**留作可插拔后端**：`voice_data` 解码后是标准 WAV，
   接任何 ASR 都是喂文件即可，不阻塞
+- **时间线可追溯（聊天时间 = 消息表 create_time，与导出的 Markdown 同一时间源）**：
+  - 文件名自带秒级聊天时间：`<日期>_<时间>_<序号>_<发信人>.wav`
+  - 每会话输出 `语音时间线.csv`（序号/聊天时间/显示时间 HH:MM/发信人/svr_id/WAV 相对路径），
+    Excel 可直接打开按时间对齐聊天记录
+  - 全局输出 `voice_map.json`（svr_id → WAV 相对路径 + 时间 + 发信人），
+    给 Markdown 导出用 `--voice-map` 嵌入：
+    ```bash
+    # 先导语音（产出 voice_map.json），再导聊天记录（语音消息行自动嵌上 WAV 路径）
+    python export_voice.py --dec "<解密库>" --session "#[MOTHER]" --out "D:/导出" --limit 100
+    python export_group_md.py --dec "<解密库>" --username "wxid_xxx" --out "D:/导出/私聊.md"         --voice-map "D:/导出/语音/voice_map.json"
+    ```
+    效果：聊天记录里 `[语音] 🎤 语音/#[MOTHER]/2023-09-02_192148_001_#[MOTHER].wav`
+    直接对应到当天该时刻的那条语音。
 
 
 ## 踩坑实录（按遇到顺序）
@@ -370,6 +383,7 @@ python extract_keys_413.py --db-dir "...\db_storage" \
 | 导出 MD 的消息类型标签 | 已知类型（文本/图片/语音/视频/表情/位置/链接/系统/撤回/拍一拍/复合/名片等）显示中文；未知类型统一显示「应用消息」或「微信消息」，**不再出现 `类型{数字}` 裸码**（审计 F 补全） |
 | 媒体导出日志 `成功 N/M（失败 X，WXGF 转码 Y）` | 失败应为 0；WXGF 失败需检查 VoipEngine.dll 是否存在（踩坑#26） |
 | 语音导出日志 `语音消息 N，VoiceInfo 命中 H（未命中 M），WAV W` | 命中率应 ~99%+（未命中为过期/撤回）；WAV 用播放器抽查，RIFF/WAVE 头完整（踩坑#28） |
+| 语音时间线 | `语音时间线.csv` 与 `voice_map.json` 已生成；Markdown 导出带 `--voice-map` 时 `[语音]` 行有 🎤 WAV 路径，且与行首时间同源 |
 | 抽查解密图片 | 随机挑一张用看图工具打开，应为正常照片（非乱码/黑块） |
 
 ## 产出与收尾
