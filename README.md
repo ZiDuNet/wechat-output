@@ -35,6 +35,7 @@
 - **群素材包（v2.4）**：`digest_source.py` 一键产出知识库素材包 `messages.json`（逐条摘要，截断 200 字）+ `stats.json`（同源统计）+ `material.md`（话题概述/发言排行/关键摘录），供下游群刊/AI 提炼消费
 - **跨全部会话批量导出（v2.4）**：`export_all_sessions.py` 一条命令跨全部群+私聊按时间窗（昨天/今天/近N天…）捞消息——「梳理昨天所有聊天记录给 AI 总结事项」。架构从消息出发：每个分库只开一次连接、每张 `Msg_` 表直接跑带 `create_time` 时间窗的 SQL，无命中会话自然 0 条、不逐个探测；产出按会话分组的 Markdown 汇总 + 可选 SQLite/JSON 结构化底座。本机 `--last 昨天`：1454 个真实会话、42 个有消息、3832 条约 15s
 - **全天跨会话梳理包（v2.5）**：`export_day_digest.py` 把某一天全部会话（群+私聊+文件传输助手）导成一套阅读包——`_总览.md` 统计+清单、大会话逐个一文件按小时分节、小会话可 `--merge-under` 合并成册；引用（带被引用人+摘录）、转账/红包（金额+备注）、小程序、文件均细分渲染。与 v2.4 汇总版互补（那边单文件+底座喂 AI，这边多文件给人读），同窗条数一致可交叉验证。md5 映射从 contact.db 全量构建，绝不拿 session.db 的 last_timestamp 剪枝（懒落盘会滞后，见 SKILL.md 踩坑#29）
+- **只读实时消息监听（v2.6）**：`watch_messages.py` 轮询解密后的 `message_*.db`，跨分片合并、自动发现新分片，按时间/`sort_seq`/`local_id` 复合水位增量投递；水位 JSON 可持久化，回调失败自动重试后才确认，支持 JSONL/text 输出，适合接 AI、脚本或日志管道。它不操作微信 UI，也不发送消息。
 - **跨平台（v2.4 已落地为代码）**：同一套代码按 `sys.platform` 自动分支——AES 后端抽到 `scripts/aes_backend.py`（win=bcrypt / macOS=CommonCrypto CCCrypt / Linux=OpenSSL EVP），数据目录/找进程/内存读取/密钥提取全部三平台化。**Windows 行为逐字节不变、本机真跑回归；macOS/Linux 为代码级移植，未真机**。路线图见 `docs/CROSS_PLATFORM.md`、研究见 `docs/WCDB_KEY_TOOL_RESEARCH.md`。
 
 ## 环境要求
@@ -112,7 +113,32 @@ python export_all_sessions.py --dec "C:/Users/xxx/.wxcache/decrypted" --last 7d 
 python wx_export.py --digest yesterday --outdir "D:/导出/昨天"                      # 一键入口
 python wx_export.py --digest 2026-09-16 --outdir "D:/导出" --merge-under 100        # 指定日期；少于100条的会话并入合集
 python export_day_digest.py --dec "C:/Users/xxx/.wxcache/decrypted" --date yesterday --outdir "D:/导出"
+
+# 10. v2.6 只读实时监听（默认首次从当前尾部开始；--since 才回放历史）
+python watch_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "群名" --state "D:/监听/listener_watermark.json"
+python watch_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --all --since 2026-09-16 --once --state "D:/监听/listener_watermark.json"
+python wx_export.py --watch "群名" --outdir "D:/监听"                 # 一键入口，输出消息监听.jsonl
+python wx_export.py --watch-all --watch-once --outdir "D:/监听"       # 全部会话只轮询一轮
 ```
+
+## 只读实时消息监听（v2.6，watch_messages.py）
+
+监听器借鉴了上游项目的可靠投递设计，但只复用本仓库已有的解密库读取链路：不依赖 UIA、OCR 或 Windows 专属包，不发送或修改微信消息。它每轮扫描全部 `message_*.db` 分片，自动发现新分片和新会话表，并用 `create_time + sort_seq + local_id` 复合水位避免跨分片重复。
+
+首次运行未指定 `--since` 时只建立当前尾部基线，不会把整库历史全部吐出；后续新消息按序输出。处理回调只有成功或重试耗尽后才推进水位，因此是“至少一次”投递：进程在输出后立刻中断时，重启可能出现一条重复，这是故意保留的可恢复语义。
+
+```bash
+# 持续监听指定会话；JSONL 适合管道/AI 消费
+python scripts/watch_messages.py --dec "<decrypted>" --session "群名" \
+  --state "D:/监听/listener_watermark.json"
+
+# 监听全部已知会话；首次从某个时间点回放一轮
+python scripts/watch_messages.py --dec "<decrypted>" --all \
+  --since 2026-09-16 --once --format jsonl --out "D:/监听/回放.jsonl" \
+  --state "D:/监听/listener_watermark.json"
+```
+
+`wx_export.py --watch/--watch-all` 可把解密缓存、输出文件和水位统一放到指定 `--outdir`。
 
 脚本遵循**程序与数据分离**：不写死任何机器路径。首次运行约 30s~8min（扫描内存提密钥），之后秒级。
 
@@ -142,6 +168,7 @@ wechat-group-export/
 │   ├── digest_source.py         # 群素材包（v2.4：messages.json + stats.json + material.md）
 │   ├── export_all_sessions.py   # 跨全部会话按时间批量导出（v2.4：Markdown 汇总 + SQLite/JSON 底座）
 │   ├── export_day_digest.py     # 全天跨会话梳理包（v2.5：总览 + 逐会话文件按小时分节 + 引用/转账/红包细分）
+│   ├── watch_messages.py        # 只读实时监听（v2.6：跨分片增量 + 持久化水位 + JSONL/text）
 │   ├── cnb_push.sh              # 推本仓到 CNB（自动注入正确 token + 绕开失效代理）
 │   └── wcdb_key_tool_windows.py # 密钥校验/解密函数（源自 TANGandXue/wcdb-key-tool，MIT）
 └── LICENSE
@@ -189,6 +216,7 @@ MIT。内嵌 `scripts/wcdb_key_tool_windows.py` 源自 [TANGandXue/wcdb-key-tool
 | [TANGandXue/wcdb-key-tool · Linux 版](https://github.com/TANGandXue/wcdb-key-tool)（`wcdb_key_tool.py`） | v2.4 **直接移植**为本仓库 `scripts/extract_keys_linux.py`：OpenSSL EVP AES 后端、ELF 静态分析锚点串定位断点（仅 x86_64）、GDB 断点抓 passphrase、`/proc/*/mem` 内存读取 | `scripts/aes_backend.py`（linux 后端）、`scripts/extract_keys_linux.py`、`scripts/media_common.py`（linux 内存分支） | MIT；同上 |
 | 跨平台 Credits 链（上游再上游，随移植一并致谢） | [kkocdko](https://kkocdko.site/post/202510212134) 的 Linux GDB 抓密钥思路；[lopleec/wxchat-export](https://github.com/lopleec/wxchat-export)；[ylytdeng/wechat-decrypt](https://github.com/ylytdeng/wechat-decrypt)；Frida hook `CCKeyDerivationPBKDF` 思路参考 yichen-wechat-local-vault | 本仓库 macOS/Linux 取密钥路线与 macOS 可选 Frida 增强的方法论来源 | 各原作者许可；本仓库仅借鉴思路、按自身需求重写 |
 | [mcncarl/yichen-skills · yichen-wechat-local-vault](https://github.com/mcncarl/yichen-skills/tree/main/yichen-wechat-local-vault) | v2.4 参考其 macOS 方案与产品设计：① `CCKeyDerivationPBKDF` 的 Frida hook 思路（本仓库作为 macOS 可选增强，默认仍走上游 LLDB/cTypes）；② 微信 4.x `local_type` 低位类型表（1文本/3图/34语音/43视频/49链接文件/10000系统）印证本仓库 `&255` 规则；③ 本地 vault/知识库组织思路——`chat_stats.py`（类型分布+发言排行+活跃时段）、`digest_source.py`（群素材包 sources/{messages.json,stats.json,material.md}）、search `--type` 过滤；④ unix 密钥/明文库 `chmod 600/700` 隐私加固 | `scripts/search_messages.py`（--type）、`scripts/chat_stats.py`、`scripts/digest_source.py`、`scripts/extract_keys_macos.py`（可选 Frida）、`scripts/aes_backend.py` | 仅借鉴思路与类型表，未照抄其 Frida 注入代码（与本仓库"默认纯 cTypes、不强制第三方加密依赖"设计一致） |
+| [fanyuantaier/wechatauto-replica](https://github.com/fanyuantaier/wechatauto-replica) | `Listener` 的可靠投递语义：跨分片增量读取、回调失败重试、水位在回调确认后推进、新分片自动发现 | `scripts/watch_messages.py` 的只读监听设计 | 仅借鉴公开 API/设计思路，未复制其 Windows UIA/坐标-OCR 实现；本仓库监听器不发送消息 |
 | [wxcdn.c3o.re](https://wxcdn.c3o.re)（第三方 CDN Worker） | 语音/媒体代下载服务契约（token/配额/redeem/download 端点），见 WeChatDataAnalysis `cdn_image_service.py` | **评估后未采用**：需上传微信 `global_config` 鉴权、配额付费、稳定性/隐私不可控 | 第三方服务，非开源 |
 | wechat-cli / wechat-smart-organizer（本机 skill） | 命令式导出思路 | **评估后未采用**：PyPI/GitHub 无对应包，命令全为空中楼阁（SKILL.md 踩坑#1/#16） | — |
 

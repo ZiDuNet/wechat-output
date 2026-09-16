@@ -70,7 +70,7 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | 需要 | 说明 |
 |---|---|
 | Python 3.10+ | 任意本机 Python（脚本零第三方依赖） |
-| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py`；**v2.4+ 新增**：统计分析台 `chat_stats.py`、群素材包 `digest_source.py`、跨全部会话批量导出 `export_all_sessions.py`；**v2.5+ 新增**：全天跨会话梳理包 `export_day_digest.py`（逐会话文件+小时分节+引用/转账/红包细分） |
+| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py`；**v2.4+ 新增**：统计分析台 `chat_stats.py`、群素材包 `digest_source.py`、跨全部会话批量导出 `export_all_sessions.py`；**v2.5+ 新增**：全天跨会话梳理包 `export_day_digest.py`（逐会话文件+小时分节+引用/转账/红包细分）；**v2.6+ 新增**：只读实时监听 `watch_messages.py`（跨分片增量、水位持久化、JSONL/text 输出） |
 | `wcdb_key_tool_windows.py` | 密钥校验/解密函数来源（GitHub: TANGandXUE/wcdb-key-tool，MIT）。若本技能 scripts 未带，从该仓库取 |
 | zstandard（**实际必需**） | 解压压缩消息。`WCDB_CT_message_content=4` 或以 `\x28\xb5\x2f\xfd` 开头的消息都靠它。实测压缩占比很高（某读书群 161/201=**80%**、某时间管理群 496/1833=27%），**不装的话这些内容全变成 `[压缩未解]` 占位符**。1.8MB wheel，装隔离 venv |
 | sqlite3 / hashlib / ctypes | 全部标准库 |
@@ -96,6 +96,8 @@ DB="$OUT/wechat_stats.db"                 # ← 统计底座库（可选；diges
 "$PY" wx_export.py --all-sessions --last 昨天 --outdir "$OUT"   # 跨全部会话按时间批量导出汇总（v2.4）
 "$PY" wx_export.py --digest yesterday --outdir "$OUT/昨天"     # 全天跨会话梳理包：总览+逐会话文件+小时分节（v2.5）
 "$PY" wx_export.py --digest 2026-09-16 --outdir "$OUT" --merge-under 100   # 指定日期；小会话并入合集
+"$PY" wx_export.py --watch "群名" --outdir "$OUT/监听"       # 只读实时监听，输出 JSONL + 持久化水位（v2.6）
+"$PY" wx_export.py --watch-all --watch-once --outdir "$OUT/监听"  # 全部会话只轮询一轮
 "$PY" wx_export.py --purge               # 清缓存（密钥+解密库，敏感）
 ```
 
@@ -562,6 +564,24 @@ python scripts/export_day_digest.py --dec "<dec>" --date yesterday --outdir "D:/
 （不硬编码），映射外的孤儿分表计数上报不静默丢弃。
 
 
+## 只读实时消息监听（v2.6，watch_messages.py）
+
+这是对上游 `Listener` 思路的本地库实现，适合需要“新消息一到就交给脚本/AI”的场景。它只读 `--dec` 下的解密库，不连接 UIA、不发送消息、不修改微信文件；轮询时每个 `message_*.db` 只读打开一次，自动发现后续新增分片。
+
+```bash
+# 指定群/联系人持续监听（会话可重复写多个 --session）
+python scripts/watch_messages.py --dec "<dec>" --session "群名" \
+  --state "D:/监听/listener_watermark.json"
+
+# 全部会话首次从时间点回放一轮；JSONL 可直接喂给下游程序
+python scripts/watch_messages.py --dec "<dec>" --all --since 2026-09-16 \
+  --once --format jsonl --out "D:/监听/回放.jsonl" \
+  --state "D:/监听/listener_watermark.json"
+```
+
+行为约定：首次运行未指定 `--since` 时建立各分片当前尾部基线，不回放历史；显式 `--since` 才从该时间点开始。每条消息的水位由 `(create_time, sort_seq, local_id)` 组成，回调成功或重试耗尽后才落盘推进，因此是至少一次投递；进程在输出后立即中断时，重启可能重复最后一条。无 `--state` 时不跨重启保存水位。`wx_export.py --watch/--watch-all` 提供同样能力的一键入口，并把输出/水位放入 `--outdir`。
+
+
 ## 跨平台（macOS / Linux，v2.4 已落地为代码）
 
 > 路线图结论见 `docs/CROSS_PLATFORM.md`。本节说"代码已怎么接、平台怎么分、哪些真跑过哪些没"。
@@ -732,6 +752,7 @@ python extract_keys_413.py --db-dir "...\db_storage" \
 | 语音时间线 | `语音时间线.csv` 与 `voice_map.json` 已生成；Markdown 导出带 `--voice-map` 时 `[语音]` 行有 🎤 WAV 路径，且与行首时间同源 |
 | 抽查解密图片 | 随机挑一张用看图工具打开，应为正常照片（非乱码/黑块） |
 | 全天梳理包 `--digest`（v2.5） | 日志 `会话 N 个 / 消息 M 条` 与 `--all-sessions --last <同日>` 总数一致（互为交叉验证）；`_总览.md` 分类桶之和 = M；日志应为"剪枝 0"（出现剪枝 N>0 说明误开了 `--prune`，⚠️ 可能漏数据，见踩坑#29） |
+| 只读监听 `watch_messages.py`（v2.6） | 合成库回归：首次 `--since` 收到历史行；第二轮只收到新增行；新增 `message_N.db` 后能补投新行；水位 JSON 原子写入且重复启动不重放已确认行 |
 
 ## 产出与收尾
 

@@ -67,6 +67,7 @@ SEARCH = os.path.join(HERE, "search_messages.py")
 EXPORT_INCREMENTAL = os.path.join(HERE, "export_incremental.py")
 EXPORT_DAY_DIGEST = os.path.join(HERE, "export_day_digest.py")
 EXPORT_ALL_SESSIONS = os.path.join(HERE, "export_all_sessions.py")
+WATCH_MESSAGES = os.path.join(HERE, "watch_messages.py")
 
 # 缓存默认位置（敏感：含解密库+密钥），用 --cache 可改。
 # 发布版默认用户主目录（跨机器恒存在）；作者/团队可用 --cache 指向私有缓存。
@@ -355,6 +356,18 @@ def main():
     ap.add_argument("--all-sessions", action="store_true",
                     help="v2.4: 跨全部会话(群+私聊)按时间批量导出汇总（--outdir 必填，"
                          "透传 --last/--since/--until；输出<outdir>/全部会话汇总.md + 可选底座）")
+    ap.add_argument("--watch", metavar="会话名",
+                    help="监听指定群/联系人新消息（只读解密缓存；--outdir 必填）")
+    ap.add_argument("--watch-all", action="store_true",
+                    help="监听全部已知会话新消息，并自动发现新分片（--outdir 必填）")
+    ap.add_argument("--watch-once", action="store_true",
+                    help="配合 --watch/--watch-all：只轮询一轮后退出")
+    ap.add_argument("--watch-since",
+                    help="配合监听：首次运行从 Unix 秒或 ISO 日期时间回放")
+    ap.add_argument("--watch-format", choices=("jsonl", "text"), default="jsonl",
+                    help="配合监听：输出格式（默认 jsonl）")
+    ap.add_argument("--watch-interval", type=float, default=1.0,
+                    help="配合监听：轮询间隔秒数（默认 1）")
     ap.add_argument("--since", help="起始时间 YYYY-MM-DD[ HH:MM:SS]（含）")
     ap.add_argument("--until", help="结束时间 YYYY-MM-DD[ HH:MM:SS]（含当天）")
     ap.add_argument("--last", help="时间范围：today/今天、yesterday/昨天、7d/近7天、2w、3m、1y、all/全部")
@@ -379,11 +392,12 @@ def main():
                                ("--biz", args.biz), ("--transfer", args.transfer),
                                ("--search", args.search), ("--incremental", args.incremental),
                                ("--digest", args.digest),
-                               ("--all-sessions", args.all_sessions)) if on]
+                               ("--all-sessions", args.all_sessions),
+                               ("--watch", args.watch), ("--watch-all", args.watch_all)) if on]
     if not actions:
         sys.exit("[x] 需要指定动作之一：--group / --user / --media / --list-groups / --list-contacts / "
                  "--sns / --favorite / --biz / --transfer / --search / --incremental / "
-                 "--digest / --all-sessions")
+                 "--digest / --all-sessions / --watch / --watch-all")
     if len(actions) > 1:
         sys.exit(f"[x] 动作互斥，一次只做一个：{', '.join(actions)}")
 
@@ -395,6 +409,13 @@ def main():
     if args.media and not args.outdir:
         sys.exit("[x] --media 需要 --outdir 指定媒体输出目录。\n"
                  "    例: wx_export.py --media all --outdir \"D:\\媒体导出\"")
+    if (args.watch or args.watch_all) and not args.outdir:
+        sys.exit("[x] --watch 需要 --outdir 指定监听输出目录。\n"
+                 "    例: wx_export.py --watch \"群名\" --outdir \"D:\\监听\"")
+    if args.watch_interval < 0:
+        sys.exit("[x] --watch-interval 不能为负数")
+    if args.watch_once and not (args.watch or args.watch_all):
+        sys.exit("[x] --watch-once 只能配合 --watch 或 --watch-all")
 
     # 启动预检（人人可用）：缓存/输出目录所在盘符不存在时（os.makedirs 抛 WinError 3），
     # 把"中途崩"变成"起步时给清晰指引"。
@@ -468,18 +489,20 @@ def main():
         run(cmd)
         return
 
-    # ---- v2.3 新模块：只读已解密缓存（需之前跑过一次完整流程，decrypted 已就绪），不再提密钥 ----
+    # ---- v2.3+ 新模块：只读已解密缓存（需之前跑过一次完整流程，decrypted 已就绪），不再提密钥 ----
     v23 = [a for a, on in (("--sns", args.sns), ("--favorite", args.favorite),
                            ("--biz", args.biz), ("--transfer", args.transfer),
                            ("--search", args.search), ("--incremental", args.incremental),
                            ("--digest", args.digest),
-                           ("--all-sessions", args.all_sessions)) if on]
+                           ("--all-sessions", args.all_sessions),
+                           ("--watch", args.watch), ("--watch-all", args.watch_all)) if on]
     if v23:
-        step(1, f"v2.3 模块：{v23[0]}（只读已解密缓存）")
+        module_version = "v2.6" if args.watch or args.watch_all else "v2.3"
+        step(1, f"{module_version} 模块：{v23[0]}（只读已解密缓存）")
         dec = os.path.join(args.cache, "decrypted")
         if not os.path.isdir(dec):
             sys.exit(f"[x] 未找到已解密缓存: {dec}\n"
-                     "    v2.3 新模块只读解密库，请先用 --group/--user 跑一次完整流程（提密钥+解密）再用。")
+                     "    v2.3+ 新模块只读解密库，请先用 --group/--user 跑一次完整流程（提密钥+解密）再用。")
         if not args.outdir:
             sys.exit("[x] v2.3 模块需要 --outdir 指定输出目录。")
         os.makedirs(args.outdir, exist_ok=True)
@@ -523,6 +546,24 @@ def main():
             if args.merge_under is not None:
                 cmd += ["--merge-under", str(args.merge_under)]
             run(cmd + ["--outdir", args.outdir])
+        elif args.watch or args.watch_all:
+            # 监听只读已解密缓存；输出与水位均落在显式 --outdir，避免把个人消息写进技能目录。
+            out_path = os.path.join(
+                args.outdir, "消息监听.jsonl" if args.watch_format == "jsonl" else "消息监听.txt"
+            )
+            state_path = os.path.join(args.outdir, "listener_watermark.json")
+            cmd = [WATCH_MESSAGES, "--dec", dec, "--state", state_path,
+                   "--out", out_path, "--format", args.watch_format,
+                   "--interval", str(args.watch_interval)]
+            if args.watch_all:
+                cmd.append("--all")
+            else:
+                cmd += ["--session", args.watch]
+            if args.watch_once:
+                cmd.append("--once")
+            if args.watch_since:
+                cmd += ["--since", args.watch_since]
+            run(cmd)
         log(f"\n[√] 完成，输出目录: {args.outdir}")
         return
 
