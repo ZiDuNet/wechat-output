@@ -70,7 +70,7 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | 需要 | 说明 |
 |---|---|
 | Python 3.10+ | 任意本机 Python（脚本零第三方依赖） |
-| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py`；**v2.4+ 新增**：统计分析台 `chat_stats.py`、群素材包 `digest_source.py` |
+| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py`；**v2.4+ 新增**：统计分析台 `chat_stats.py`、群素材包 `digest_source.py`、跨全部会话批量导出 `export_all_sessions.py` |
 | `wcdb_key_tool_windows.py` | 密钥校验/解密函数来源（GitHub: TANGandXUE/wcdb-key-tool，MIT）。若本技能 scripts 未带，从该仓库取 |
 | zstandard（**实际必需**） | 解压压缩消息。`WCDB_CT_message_content=4` 或以 `\x28\xb5\x2f\xfd` 开头的消息都靠它。实测压缩占比很高（某读书群 161/201=**80%**、某时间管理群 496/1833=27%），**不装的话这些内容全变成 `[压缩未解]` 占位符**。1.8MB wheel，装隔离 venv |
 | sqlite3 / hashlib / ctypes | 全部标准库 |
@@ -93,6 +93,7 @@ DB="$OUT/wechat_stats.db"                 # ← 统计底座库（可选；diges
 "$PY" wx_export.py --media "联系人" --media-video --outdir "$OUT/媒体"  # 导出某人图片+视频
 "$PY" wx_export.py --list-groups         # 列出全部群名（秒级，用来确认群名）
 "$PY" wx_export.py --list-contacts       # 列出全部联系人（秒级）
+"$PY" wx_export.py --all-sessions --last 昨天 --outdir "$OUT"   # 跨全部会话按时间批量导出汇总（v2.4）
 "$PY" wx_export.py --purge               # 清缓存（密钥+解密库，敏感）
 ```
 
@@ -473,6 +474,53 @@ python scripts/digest_source.py --dec "<dec>" --username "xxx@chatroom" --outdir
 
 - 与 chat_stats 共用 `load_messages`/`compute_stats`，统计口径同源。
 - `--excerpts N` 控制关键消息摘录条数（默认 15）；`--no-zstd` 同 chat_stats。
+
+
+## 跨会话批量导出（v2.4）
+
+> 场景：「帮我梳理一下昨天所有聊天记录，总结一下有哪些事项」——需要跨**全部**会话（群 `@chatroom` + 私聊 wxid）一次性按时间窗捞消息，而不是一次只导一个群/会话。纯增量脚本 `export_all_sessions.py`，不改任何现有导出脚本。
+
+### 架构：从消息出发，SQL 时间窗直查，会话只做命名
+
+与 `export_group_md`「先定位一个群再找分表」相反，本脚本**不枚举会话去逐个探测**，而是：
+
+1. 只遍历 `message/message_<N>.db`（N 为数字 0..8；`biz_message_0.db` / `media_*.db` / `message_fts.db` / `message_resource.db` / `weclaw.db` 按正则 `^message_\d+\.db$` 一律排除）。
+2. 每个分库**只开一次连接**：一次性 `SELECT name FROM sqlite_master ... LIKE 'Msg_%'` 拿到该库全部表名，一次性读出该库 `Name2Id`（rid→user_name，局部于库）。
+3. 对每张 `Msg_<md5(username)>` 表直接跑带时间窗的 SQL：
+   `SELECT ... FROM "Msg_<hash>" WHERE create_time >= ? AND create_time <= ?`。
+   昨天/近窗没消息的会话 SQL 自然 0 命中，**根本不进结果**——无需逐个会话探测。
+4. 命中按表名 hash 分组、组内按 `(create_time, sort_seq)` 正序；跨库分片沿用 `export_group_md` 已验证的 `(时间, real_sender_id, 内容哈希)` 去重（只与前面的库比，不误删同库内同秒同人不同文）。
+5. 最后一次性 hash→username→昵称：`contact.db` 一次查 `username/nick_name/remark` 建字典，再 `md5(username)` 反查表名 hash；`SessionTable`（session.db）仅作「枚举会话总数/跳过清单」的真实会话 universe，**绝不用于驱动查询**。
+
+发信人解析沿用 `export_group_md` 两级定案（踩坑#20）：内容前缀 `<发信ン>:\n`（群内他人消息真身）> 本库 `Name2Id` 解析 `real_sender_id`（无前缀=自己发，或私聊对方）。
+
+### 用法
+
+```bash
+# 一键入口（推荐，走 dec 缓存；--outdir 必填）
+python wx_export.py --all-sessions --last 昨天 --outdir "D:/导出"
+#   产出 <outdir>/全部会话汇总.md + 全部会话汇总_底座.db + 全部会话汇总_底座.json
+
+# 直接跑（调试）
+python scripts/export_all_sessions.py --dec "<dec>" --last 昨天 --out "汇总.md"
+python scripts/export_all_sessions.py --dec "<dec>" --last 7d --out "汇总.md" --sqlite 底座.db --json 底座.json
+python scripts/export_all_sessions.py --dec "<dec>" --last all --out "全量.md" --no-groups          # 只要私聊
+python scripts/export_all_sessions.py --dec "<dec>" --since 2026-09-01 --until 2026-09-16 --out "汇总.md"
+```
+
+参数：`--include-groups/--no-groups`、`--include-private/--no-private`（默认全开）、`--max-text` 单条正文截断（默认 300 字防爆体积）、`--no-zstd` 跳解压；时间窗复用 `--last/--since/--until`（昨天/今天/近N天/周/月/年/all，中英）。
+
+输出三件：
+
+| 产物 | 内容 |
+|---|---|
+| `汇总.md` | 开头一段统计（枚举会话数/有消息会话/跳过数/消息总数）；每个会话一节（标题=昵称·群/私聊·条数·首末时间），消息按时间正序带发信人昵称；会话按条数降序排 |
+| `底座.db`（可选 `--sqlite`） | 两表：`sessions(username,display_name,kind,msg_count,first_time,last_time)` + `messages(session_username,create_time,sender,sender_display,local_type,is_system,content)`，供上层 AI 总结事项 |
+| `底座.json`（可选 `--json`） | 与 SQLite 同源的 JSON，供程序读 |
+
+结尾打印：枚举会话总数、有消息会话数、跳过会话数及样例、总消息数、逐分库扫描统计、耗时。
+
+> 本机实测（2026-09-17，`--last 昨天`）：枚举会话 1454（SessionTable 真实会话），时间窗内 42 个会话有消息、共 3832 条（有效 3785 / 系统 47），9 个分库仅 `message_1.db` 命中，耗时约 15s。抽样与 `export_group_md` 同窗口比对：某群 1556=1556、某私聊 49=49，条数一致（差 0）。
 
 
 ## 跨平台（macOS / Linux，v2.4 已落地为代码）

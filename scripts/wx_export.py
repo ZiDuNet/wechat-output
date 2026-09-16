@@ -61,6 +61,8 @@ EXPORT_BIZ = os.path.join(HERE, "export_biz.py")
 EXPORT_TRANSFER = os.path.join(HERE, "export_transfer.py")
 SEARCH = os.path.join(HERE, "search_messages.py")
 EXPORT_INCREMENTAL = os.path.join(HERE, "export_incremental.py")
+EXPORT_DAY_DIGEST = os.path.join(HERE, "export_day_digest.py")
+EXPORT_ALL_SESSIONS = os.path.join(HERE, "export_all_sessions.py")
 
 # 缓存默认位置（敏感：含解密库+密钥），用 --cache 可改。
 # 发布版默认用户主目录（跨机器恒存在）；作者/团队可用 --cache 指向私有缓存。
@@ -339,6 +341,16 @@ def main():
     ap.add_argument("--search", metavar="关键词", help="v2.3: 聊天全文搜索（结果打到 --outdir/搜索结果.md）")
     ap.add_argument("--incremental", metavar="会话名",
                     help="v2.3: 增量导出指定会话（状态文件记录上次位置；--outdir 必填）")
+    ap.add_argument("--digest", metavar="YYYY-MM-DD|yesterday",
+                    help="v2.5: 全天跨会话导出（群+私聊，一天一梳；--outdir 必填；"
+                         "日期或 today/今天、yesterday/昨天）")
+    ap.add_argument("--cap", type=int, default=None,
+                    help="配合 --digest：每条消息截断长度（默认 150 字）")
+    ap.add_argument("--merge-under", type=int, default=None, metavar="N",
+                    help="配合 --digest：少于 N 条的会话并入 _其余会话合集.md（默认 0=关闭）")
+    ap.add_argument("--all-sessions", action="store_true",
+                    help="v2.4: 跨全部会话(群+私聊)按时间批量导出汇总（--outdir 必填，"
+                         "透传 --last/--since/--until；输出<outdir>/全部会话汇总.md + 可选底座）")
     ap.add_argument("--since", help="起始时间 YYYY-MM-DD[ HH:MM:SS]（含）")
     ap.add_argument("--until", help="结束时间 YYYY-MM-DD[ HH:MM:SS]（含当天）")
     ap.add_argument("--last", help="时间范围：today/今天、yesterday/昨天、7d/近7天、2w、3m、1y、all/全部")
@@ -361,10 +373,11 @@ def main():
                                ("--list-contacts", args.list_contacts),
                                ("--sns", args.sns), ("--favorite", args.favorite),
                                ("--biz", args.biz), ("--transfer", args.transfer),
-                               ("--search", args.search), ("--incremental", args.incremental)) if on]
+                               ("--search", args.search), ("--incremental", args.incremental),
+                               ("--all-sessions", args.all_sessions)) if on]
     if not actions:
         sys.exit("[x] 需要指定动作之一：--group / --user / --media / --list-groups / --list-contacts / "
-                 "--sns / --favorite / --biz / --transfer / --search / --incremental")
+                 "--sns / --favorite / --biz / --transfer / --search / --incremental / --all-sessions")
     if len(actions) > 1:
         sys.exit(f"[x] 动作互斥，一次只做一个：{', '.join(actions)}")
 
@@ -452,7 +465,8 @@ def main():
     # ---- v2.3 新模块：只读已解密缓存（需之前跑过一次完整流程，decrypted 已就绪），不再提密钥 ----
     v23 = [a for a, on in (("--sns", args.sns), ("--favorite", args.favorite),
                            ("--biz", args.biz), ("--transfer", args.transfer),
-                           ("--search", args.search), ("--incremental", args.incremental)) if on]
+                           ("--search", args.search), ("--incremental", args.incremental),
+                           ("--all-sessions", args.all_sessions)) if on]
     if v23:
         step(1, f"v2.3 模块：{v23[0]}（只读已解密缓存）")
         dec = os.path.join(args.cache, "decrypted")
@@ -486,6 +500,13 @@ def main():
             run([EXPORT_INCREMENTAL, "--dec", dec, "--session", args.incremental,
                  "--out", os.path.join(args.outdir, re.sub(r'[\\/:*?"<>|]', "_", args.incremental) + "_聊天记录.md")]
                 + _time([]))
+        elif args.all_sessions:
+            # v2.4：跨全部会话按时间批量导出。Markdown 汇总 + 同源 SQLite/JSON 底座（供上层 AI 总结事项）
+            out_md = os.path.join(args.outdir, "全部会话汇总.md")
+            out_db = os.path.join(args.outdir, "全部会话汇总_底座.db")
+            out_js = os.path.join(args.outdir, "全部会话汇总_底座.json")
+            run([EXPORT_ALL_SESSIONS, "--dec", dec, "--out", out_md,
+                 "--sqlite", out_db, "--json", out_js] + _time([]))
         log(f"\n[√] 完成，输出目录: {args.outdir}")
         return
 
