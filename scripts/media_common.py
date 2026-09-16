@@ -423,9 +423,13 @@ def wxgf_to_image(data: bytes, dll_path: str) -> bytes | None:
 def parse_time_range(since=None, until=None, last=None):
     """解析 --since/--until/--last 为 (since_ts, until_ts)（unix 秒，含边界）。
     - since/until: YYYY-MM-DD 或 YYYY-MM-DD HH:MM:SS；until 省略时刻时按当日 23:59:59（含当天）
-    - last: <N><d|w|m|y>，如 7d=近7天、2w=近2周、3m=近3月、1y=近1年（含今天）
-    - 全部不传返回 (None, None)
-    今天  = --since <今天>；昨天 = --since <昨天> --until <今天>。"""
+    - last 支持自然语言（大小写/中英均可）：
+        today / 今天            = 今天 00:00 ~ 23:59
+        yesterday / 昨天        = 昨天 00:00 ~ 昨天 23:59
+        <N>d|w|m|y / 近N天|周|月|年 = 近 N 天/周/月/年（含今天），如 7d / 2w / 3m / 1y
+        all / 0 / 全部          = 不过滤（= 不传）
+    - 全部不传返回 (None, None)。"""
+    import re
     from datetime import datetime, timedelta
     if since is None and until is None and last is None:
         return None, None
@@ -444,15 +448,26 @@ def parse_time_range(since=None, until=None, last=None):
     since_ts = _parse(since, False) if since else None
     until_ts = _parse(until, True) if until else None
     if last:
-        m = __import__("re").match(r"^(\d+)([dwmy])$", last.strip().lower())
-        if not m:
-            raise ValueError(f"--last 格式不支持: {last}（用 7d / 2w / 3m / 1y）")
-        n, unit = int(m.group(1)), m.group(2)
-        mul = {"d": 1, "w": 7, "m": 30, "y": 365}[unit]
-        start = (now - timedelta(days=n * mul)).replace(hour=0, minute=0, second=0)
-        since_ts = int(start.timestamp())
-        if until_ts is None:
-            until_ts = int(now.replace(hour=23, minute=59, second=59).timestamp())
+        s = last.strip().lower().replace(" ", "")
+        if s in ("today", "今天"):
+            d0 = now.replace(hour=0, minute=0, second=0)
+            since_ts, until_ts = int(d0.timestamp()), int(now.replace(hour=23, minute=59, second=59).timestamp())
+        elif s in ("yesterday", "昨天"):
+            y0 = (now - timedelta(days=1)).replace(hour=0, minute=0, second=0)
+            since_ts, until_ts = int(y0.timestamp()), int(y0.replace(hour=23, minute=59, second=59).timestamp())
+        elif s in ("all", "全部", "0"):
+            return None, None
+        else:
+            m = re.match(r"^(?:近)?(\d+)([dwmy]|天|周|月|年)$", s)
+            if not m:
+                raise ValueError(f"--last 格式不支持: {last}（用 today / yesterday / 7d / 2w / 3m / 1y / all）")
+            n, unit = int(m.group(1)), m.group(2)
+            mul = {"d": 1, "w": 7, "m": 30, "y": 365,
+                   "天": 1, "周": 7, "月": 30, "年": 365}[unit]
+            start = (now - timedelta(days=n * mul)).replace(hour=0, minute=0, second=0)
+            since_ts = int(start.timestamp())
+            if until_ts is None:
+                until_ts = int(now.replace(hour=23, minute=59, second=59).timestamp())
     if since_ts and until_ts and since_ts > until_ts:
         raise ValueError("--since 晚于 --until，时间范围为空")
     return since_ts, until_ts
@@ -462,5 +477,5 @@ def add_time_args(ap):
     """给 argparse 统一加 --since/--until/--last 三参数，返回即可。"""
     ap.add_argument("--since", help="起始时间 YYYY-MM-DD[ HH:MM:SS]（含）")
     ap.add_argument("--until", help="结束时间 YYYY-MM-DD[ HH:MM:SS]（含当天）")
-    ap.add_argument("--last", help="近 N 段时间：7d=近7天、2w=近2周、3m=近3月、1y=近1年")
+    ap.add_argument("--last", help="时间范围：today/今天、yesterday/昨天、7d/近7天、2w/2周、3m/3月、1y/1年、all/全部")
     return ap

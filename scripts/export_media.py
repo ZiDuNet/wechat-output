@@ -27,6 +27,7 @@ import shutil
 import sqlite3
 import sys
 import time
+from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from media_common import (  # noqa: E402
@@ -87,8 +88,9 @@ def load_keys(keys_path):
     return aes_key, int(k.get("xor_key", 0)), k.get("wxid")
 
 
-def iter_dat_files(attach_root, session_filter=None):
-    """遍历 attach/<会话hash>/<月份>/Img/*.dat，返回 (session_hash, month, path)。"""
+def iter_dat_files(attach_root, session_filter=None, since_ts=None, until_ts=None):
+    """遍历 attach/<会话hash>/<月份>/Img/*.dat，返回 (session_hash, month, path)。
+    时间过滤按月份目录近似（缓存目录月份 = 接收/下载月份）。"""
     for d in sorted(os.listdir(attach_root)):
         ad = os.path.join(attach_root, d)
         if not os.path.isdir(ad):
@@ -96,6 +98,14 @@ def iter_dat_files(attach_root, session_filter=None):
         if session_filter and d.lower() != session_filter.lower():
             continue
         for m in sorted(os.listdir(ad)):
+            try:
+                ym = datetime.strptime(m, "%Y-%m")
+            except ValueError:
+                continue
+            if since_ts is not None and int(ym.replace(day=1).timestamp()) + 32 * 86400 < since_ts:
+                continue
+            if until_ts is not None and int(ym.replace(day=1).timestamp()) > until_ts + 32 * 86400:
+                continue
             md = os.path.join(ad, m)
             img = os.path.join(md, "Img")
             if not os.path.isdir(img):
@@ -114,7 +124,17 @@ def main():
     ap.add_argument("--session", help="只导出指定会话（32 位表 hash，或联系人/群名，需 --dec）")
     ap.add_argument("--dec", help="解密库目录（可选，用于把会话 hash 映射成可读名称）")
     ap.add_argument("--video", action="store_true", help="同时复制视频（明文 mp4）")
+    try:
+        from media_common import add_time_args, parse_time_range
+        add_time_args(ap)
+    except ImportError:
+        pass
     args = ap.parse_args()
+    since_ts = until_ts = None
+    try:
+        since_ts, until_ts = parse_time_range(args.since, args.until, args.last)
+    except Exception as e:
+        sys.exit(f"[x] {e}")
 
     account = find_account_dir(args.account_dir)
     if not account:
@@ -151,7 +171,7 @@ def main():
 
     # 会话名映射（图片输出目录用可读名；有解密库时按 username 反查备注/昵称）
     sessions = {}
-    for d, _m, _p in iter_dat_files(attach, session_filter):
+    for d, _m, _p in iter_dat_files(attach, session_filter, since_ts, until_ts):
         sessions.setdefault(d, None)
 
     # ---- WXGF 转码器（按需懒加载）
@@ -161,9 +181,9 @@ def main():
     out_img = os.path.join(args.out, "图片")
     stats = {"total": 0, "ok": 0, "fail": 0, "wxgf": 0, "wxgf_fail": 0, "skip_v1": 0}
     t0 = time.time()
-    n_files = sum(1 for _ in iter_dat_files(attach, session_filter))
+    n_files = sum(1 for _ in iter_dat_files(attach, session_filter, since_ts, until_ts))
     log(f"  [i] 图片文件共 {n_files} 个，开始解密...")
-    for i, (d, m, p) in enumerate(iter_dat_files(attach, session_filter), 1):
+    for i, (d, m, p) in enumerate(iter_dat_files(attach, session_filter, since_ts, until_ts), 1):
         stats["total"] += 1
         if i % 500 == 0:
             log(f"    ... {i}/{n_files}（成功 {stats['ok']} 失败 {stats['fail']}）")
@@ -224,6 +244,12 @@ def main():
             for root, _d, files in os.walk(vdir):
                 for fn in files:
                     if fn.lower().endswith((".mp4", ".mov", ".avi", ".mkv")):
+                        if since_ts is not None or until_ts is not None:
+                            mt = os.path.getmtime(os.path.join(root, fn))
+                            if since_ts is not None and mt < since_ts:
+                                continue
+                            if until_ts is not None and mt > until_ts:
+                                continue
                         rel = os.path.relpath(root, vdir)
                         d = os.path.join(vout, rel)
                         os.makedirs(d, exist_ok=True)

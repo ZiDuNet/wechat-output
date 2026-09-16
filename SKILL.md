@@ -311,6 +311,38 @@ python export_media_index.py --account-dir ... --dec ... --type file --session "
 未命中的媒体 = 未在微信客户端点开过，本地拿不到（工具无法凭空下载）。
 视频缩略图 `_thumb.jpg` 与 mp4 同名同目录，可作识别线索。
 
+### 按时间范围导出（今天 / 昨天 / 近 N 天·周·月·年 / 全部）
+
+所有导出脚本统一支持 `--last` / `--since` / `--until`（media_common.parse_time_range，
+大小写与中英均可）：
+
+| 用户说法 | 命令参数 | 效果 |
+|---------|---------|------|
+| 今天的 | `--last today` 或 `--last 今天` | 今天 00:00 ~ 23:59 |
+| 昨天的 | `--last yesterday` / `--last 昨天` | 昨天 00:00 ~ 昨天 23:59 |
+| 近 7 天 | `--last 7d` / `--last 近7天` | 含今天往前 7 天 |
+| 近 2 周 | `--last 2w` / `--last 近2周` | 含今天往前 2 周 |
+| 近 3 个月 | `--last 3m` / `--last 近3月` | 含今天往前 3 月 |
+| 近 1 年 | `--last 1y` / `--last 近1年` | 含今天往前 1 年 |
+| 全部 | `--last all` / `--last 全部` / 不传 | 不过滤 |
+| 自定义区间 | `--since 2026-09-01 --until 2026-09-10` | 含边界；until 省略时刻按当日 23:59:59 |
+
+各脚本接入情况：
+
+```bash
+# 聊天记录 Markdown（按消息 create_time 精确过滤）
+python export_group_md.py --dec "<解密库>" --username "wxid_xxx" --out "近7天.md" --last 7d
+# 语音导出（按消息 create_time）
+python export_voice.py --dec "<解密库>" --session "晓东" --out "D:/语音" --last yesterday
+# 媒体索引（文件按消息时间；图片按缓存月份目录近似；视频按文件 mtime 近似）
+python export_media_index.py --account-dir "..." --dec "..." --session "XX群" --type file --last 30d
+# 图片解密导出（按缓存月份目录近似）
+python export_media.py --account-dir "..." --keys "..." --out "D:/媒体" --last 3m
+# 一键入口 wx_export 直接透传
+python wx_export.py --group "群名" --outdir "D:/导出" --last 今天
+python wx_export.py --user "晓东" --outdir "D:/导出" --last 7d --with-zstd 2>&1 | Out-Null
+```
+
 
 ## 踩坑实录（按遇到顺序）
 

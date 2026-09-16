@@ -302,8 +302,12 @@ def main():
     msgs = []            # 结构化输出缓冲: (room_id, ts, sender, local_type, is_system, content)
     known_users = set(nick) | all_n2i_users   # 老式微信号前缀互证集合（审计 E6）
     for r in all_rows:
-        stats["total"] += 1
         ts = r["create_time"]
+        if since_ts is not None and ts < since_ts:
+            continue
+        if until_ts is not None and ts > until_ts:
+            continue
+        stats["total"] += 1
         day = datetime.fromtimestamp(ts).strftime("%Y-%m-%d")
         if day != cur_day:
             cur_day = day

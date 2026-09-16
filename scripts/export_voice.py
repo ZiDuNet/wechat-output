@@ -98,7 +98,7 @@ def resolve_session_hash(dec, name):
     return hashlib.md5(list(nick)[0].encode()).hexdigest()
 
 
-def collect_voice_msgs(dec, session_hash):
+def collect_voice_msgs(dec, session_hash, since_ts=None, until_ts=None):
     """遍历 message_*.db，收集目标会话语音消息 (server_id, create_time, username)"""
     msgs = []
     for db in find_db(dec, "message*.db"):
@@ -121,9 +121,16 @@ def collect_voice_msgs(dec, session_hash):
                     n2i[r[0]] = r[1]
             except Exception:
                 pass
-            rows = conn.execute(
-                f"SELECT server_id, create_time, real_sender_id FROM [{tbl}] "
-                "WHERE local_type=34 AND server_id IS NOT NULL").fetchall()
+            sql = (f"SELECT server_id, create_time, real_sender_id FROM [{tbl}] "
+                   "WHERE local_type=34 AND server_id IS NOT NULL")
+            args = []
+            if since_ts is not None:
+                sql += " AND create_time >= ?"
+                args.append(since_ts)
+            if until_ts is not None:
+                sql += " AND create_time <= ?"
+                args.append(until_ts)
+            rows = conn.execute(sql, args).fetchall()
             conn.close()
             for svr_id, ct, rid in rows:
                 msgs.append((svr_id, ct, n2i.get(rid, "")))
@@ -208,7 +215,17 @@ def main():
     ap.add_argument("--out", required=True, help="语音输出目录")
     ap.add_argument("--limit", type=int, default=0,
                     help="最多导出 N 条（抽样调试用，0=全部）")
+    try:
+        from media_common import add_time_args, parse_time_range
+        add_time_args(ap)
+    except ImportError:
+        pass
     args = ap.parse_args()
+    since_ts = until_ts = None
+    try:
+        since_ts, until_ts = parse_time_range(args.since, args.until, args.last)
+    except Exception as e:
+        sys.exit(f"[x] {e}")
 
     if not os.path.isdir(args.dec):
         sys.exit(f"[x] 解密库目录不存在: {args.dec}")
@@ -273,7 +290,7 @@ def main():
         os.makedirs(sdir, exist_ok=True)
 
         # 收集该会话语音消息（复用 collect_voice_msgs：含本库 Name2Id -> username）
-        msgs = collect_voice_msgs(args.dec, h)
+        msgs = collect_voice_msgs(args.dec, h, since_ts, until_ts)
         # 去重（跨库可能重复） + 时间排序
         seen = set()
         uniq = []

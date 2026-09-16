@@ -253,6 +253,9 @@ def main():
     ap.add_argument("--purge", action="store_true", help="删除缓存（密钥+解密库，敏感；需配 --yes 确认）")
     ap.add_argument("--yes", action="store_true", help="配合 --purge 跳过删除确认")
     ap.add_argument("--sqlite", help="结构化输出 SQLite 路径（统计底座，可选）")
+    ap.add_argument("--since", help="起始时间 YYYY-MM-DD[ HH:MM:SS]（含）")
+    ap.add_argument("--until", help="结束时间 YYYY-MM-DD[ HH:MM:SS]（含当天）")
+    ap.add_argument("--last", help="时间范围：today/今天、yesterday/昨天、7d/近7天、2w、3m、1y、all/全部")
     args = ap.parse_args()
 
     if args.purge:
@@ -350,6 +353,9 @@ def main():
             cmd += ["--video"]
         if os.path.isdir(dec):
             cmd += ["--dec", dec]  # 会话名映射（有解密库时更友好）
+        for fl in ("--since", "--until", "--last"):
+            if getattr(args, fl[2:]):
+                cmd += [fl, getattr(args, fl[2:])]
         run(cmd)
         return
 
@@ -441,6 +447,9 @@ def main():
     out = args.out or os.path.join(args.outdir, safe + "_聊天记录.md")
     # 用 --username 精确定位（上游已消歧），下游不再做模糊匹配 —— 杜绝二次误配
     cmd = [EXPORT, "--dec", dec, "--username", uname, "--out", out]
+    for fl in ("--since", "--until", "--last"):
+        if getattr(args, fl[2:]):
+            cmd += [fl, getattr(args, fl[2:])]
     if args.sqlite:
         cmd += ["--sqlite", args.sqlite]
     try:
