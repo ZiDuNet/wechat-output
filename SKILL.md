@@ -1,6 +1,6 @@
 ---
 name: wechat-group-export
-description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密钥破解）本地加密数据库提取密钥、解密，导出指定群聊/私聊为 Markdown，并解密导出图片/视频等媒体。数据库密钥与图片密钥均从进程内存自动提取（图片密钥由登录态 code 派生，全自动，无需打开图片）。零第三方依赖；解压富文本消息需 zstandard（1.8MB wheel）。触发词：导出微信群聊、微信聊天记录、微信解密、群聊备份、私聊导出、微信图片导出、微信媒体导出、微信数据库。
+description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密钥破解）本地加密数据库提取密钥、解密，导出指定群聊/私聊为 Markdown，并解密导出图片/视频，以及从 VoiceInfo 表提取语音解码为 WAV。数据库密钥与图片密钥均从进程内存自动提取（图片密钥由登录态 code 派生，全自动，无需打开图片）。零第三方依赖；解压富文本消息需 zstandard（1.8MB wheel）。触发词：导出微信群聊、微信聊天记录、微信解密、群聊备份、私聊导出、微信图片导出、微信媒体导出、微信数据库。
 ---
 
 # 微信聊天记录导出全流程（群聊 / 私聊 / 媒体，Windows / 微信 4.1.13 实测）
@@ -188,7 +188,7 @@ python -m pip install zstandard
 ```
 
 
-## 媒体导出（图片 / 视频，v2.0 新增）
+## 媒体导出（图片 / 视频 / 语音，v2.0+ 新增）
 
 > 实测（2026-09-17）：#[MOTHER] 私聊媒体 1758 张图片全部解密成功（失败 0），另复制视频 130 个，
 > 全程约 10s。图片密钥**全自动提取**——扫微信进程内存里的登录态整数 code（常驻，实测数百处副本），
@@ -200,7 +200,7 @@ python -m pip install zstandard
 |---|---|
 | `msg/attach/<会话hash>/<YYYY-MM>/Img/<md5>.dat` | 图片缓存。V2 加密格式：`070856320807` + aes_size + xor_size + pad → AES 区(ECB+PKCS7) + 明文区 + XOR 区 |
 | `msg/video/` | 视频为**明文 mp4**，直接复制即可，无需解密 |
-| 语音 | **本地不落盘**（仅存 CDN 引用），本工具不导出语音 |
+| 语音 | **存在数据库里**（`message/media_*.db` 的 `VoiceInfo` 表，`voice_data` BLOB），语音不落文件系统（`VoiceTemp` 目录恒空）——见下方语音导出 |
 
 ### 图片密钥派生（账号级固定，微信版本无关的数学规律）
 
@@ -236,6 +236,33 @@ python export_media.py --account-dir "D:/微信数据/xwechat_files/<wxid>" \
   会把会话 hash 目录映射成可读名称（#[MOTHER] 而非 32 位 hash）
 - 输出结构：`<out>/图片/<会话名或hash>/<月份>_<md5>[_t].jpg`；WXGF 转码的完整原图去掉 `_t` 后缀
 - 首次约 10~30s（扫内存提 code + 解密），之后复用 `media_keys.json` 秒级完成
+
+### 语音导出（v2.1 新增，全 Python 原生，零 exe / 零 DLL / 零第三方服务）
+
+> **关键发现（chatlog fork 开源实现验证，纠正"语音不落盘"的旧结论）**：微信把语音数据
+> **存在数据库里**——`<db_storage>/message/media_*.db` 的 `VoiceInfo` 表（`voice_data` BLOB，
+> SILK v3 格式，`0x02#!SILK_V3` 头 + 2B 帧长前缀）。消息表 `local_type=34` 的
+> `server_id` = `VoiceInfo.svr_id`，一一对应。实测 #[MOTHER] 6353 条语音消息
+> 6329 条在 VoiceInfo 命中（**99.6%**），未命中 24 条为过期/撤回等罕见情况。
+> 之前"全盘扫不到音频文件"是因为语音根本不落文件系统，扫错地方了。
+
+- 解码用 **pysilk**（`pip install silk-python`，cffi 绑定的 Python 库）——不下载 exe、
+  不调微信 DLL、不绑微信版本。`--voice` 时懒加载，缺失时提示安装。
+- 依赖解密库（语音在解密后的 media_*.db，不像图片那样独立于 DB 密钥）。
+
+```bash
+# 导出指定会话语音为 WAV（32 位 hash 或联系人/群名）
+python export_voice.py --dec "<解密库目录>" --session "#[MOTHER]" --out "D:/语音导出"
+
+# 导出全部会话（量大，谨慎；--limit N 可抽样调试）
+python export_voice.py --dec "<解密库目录>" --out "D:/语音导出" --limit 10
+```
+
+- 输出：`<out>/语音/<会话名或hash>/<日期>_<时间>_<序号>_<发信人>.wav`（24kHz 单声道 WAV）
+- 发信人 = 消息所在库 `Name2Id`（rid→username，局部于库，踩坑#20 同源逻辑）→ contact 备注/昵称
+- 转文字（whisper / 云 API）**留作可插拔后端**：`voice_data` 解码后是标准 WAV，
+  接任何 ASR 都是喂文件即可，不阻塞
+
 
 ## 踩坑实录（按遇到顺序）
 
@@ -307,6 +334,15 @@ python export_media.py --account-dir "D:/微信数据/xwechat_files/<wxid>" \
 27. **PowerShell 通配符坑（纯排查误导）**：目录名含 `[`（如 `#[MOTHER]`）时
     `Get-ChildItem -Directory | % FullName` 显示 0 个文件，是 `[` 被当通配符，文件其实都在。
     用 Python os.listdir 复查，别据此误判导出失败。
+28. **语音不落盘是假象，数据在 VoiceInfo 表（语音导出的核心突破）**：VoiceTemp 目录全空、
+    全盘无 .silk/.amr 不代表没语音——微信把语音 BLOB 存在 `message/media_*.db` 的
+    `VoiceInfo` 表（svr_id ↔ 消息 server_id）。先查库再下结论，别扫文件系统。
+    - 解码链路（全 Python 原生）：`pip install silk-python` → `pysilk` 直接吃
+      `0x02#!SILK_V3` 头 + 2B 帧长前缀（内部处理，无需自己拆帧）→ 24kHz WAV。
+    - 备选：微信 `VoipEngine.dll` 的 `SKP_Silk_SDK_*`（ctypes 可解，但绑微信版本）；
+      `silk_v3_decoder.exe`（kn007 预编译，可解但引入第三方 exe）。**pysilk 最优**。
+    - whisper 本地转写（faster-whisper）在 Python 3.14 上 ctranslate2 加载模型崩溃
+      （0xC0000005）——若走本地转写建议 Python ≤3.13，或直接用 ASR 接口。
 
 22. **「天数」口径不统一会跨技能差 1（digest 群刊实战发现）**：导出完整性日志用 `(t1-t0)/86400`（差值天，不含首尾），群刊页面用 `date 差 +1`（含首尾的覆盖天）——同一群一个报 42 天一个报 43 天，用户对账必懵。**统一口径：跨度天数 = 含首尾覆盖天（秒差/86400 + 1，或 date 差 +1）**，页面与日志永远同数。教训：跨脚本/跨技能的"同义数字"要同源定义，发现差 1 先查口径而非数据。
 
@@ -333,6 +369,7 @@ python extract_keys_413.py --db-dir "...\db_storage" \
 | `消息口径对账: 共 N 条 = 有效 X + 系统 Y` | `X` 应等于统计底座 `groups.msg_count`，也等于群刊展示的「有效消息」数；三者不一致先查这行（差值是系统/撤回/拍一拍） |
 | 导出 MD 的消息类型标签 | 已知类型（文本/图片/语音/视频/表情/位置/链接/系统/撤回/拍一拍/复合/名片等）显示中文；未知类型统一显示「应用消息」或「微信消息」，**不再出现 `类型{数字}` 裸码**（审计 F 补全） |
 | 媒体导出日志 `成功 N/M（失败 X，WXGF 转码 Y）` | 失败应为 0；WXGF 失败需检查 VoipEngine.dll 是否存在（踩坑#26） |
+| 语音导出日志 `语音消息 N，VoiceInfo 命中 H（未命中 M），WAV W` | 命中率应 ~99%+（未命中为过期/撤回）；WAV 用播放器抽查，RIFF/WAVE 头完整（踩坑#28） |
 | 抽查解密图片 | 随机挑一张用看图工具打开，应为正常照片（非乱码/黑块） |
 
 ## 产出与收尾

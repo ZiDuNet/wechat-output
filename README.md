@@ -1,4 +1,4 @@
-# wechat-group-export · 微信聊天记录导出（群聊 / 私聊 / 媒体，Windows）
+# wechat-group-export · 微信聊天记录导出（群聊 / 私聊 / 媒体 / 语音，Windows）
 
 从微信 Windows 4.x 的本地加密数据库提取密钥、解密，把指定群聊/私聊导出为 Markdown，并把图片/视频等媒体解密导出的工具链。**数据库密钥与图片密钥均从进程内存自动提取**（图片密钥由登录态 code 派生，全自动、无需打开图片）；**零第三方依赖即可完成提取+解密**；解压富文本消息需 zstandard（1.8MB）。
 
@@ -14,6 +14,7 @@
 - **可选 `--sqlite` 双出口**：同一次解析额外产出结构化 SQLite（groups / members / messages 三表），是统计与群刊（姊妹项目 wechat-group-digest）的数据底座
 - **私聊导出**：`--user "备注/昵称"` 导出任意联系人的完整聊天记录（与群聊同源的解析/去重/发信人校验逻辑）
 - **媒体导出（v2.0 新增）**：`--media "会话名|all"` 解密导出图片（V2 格式 AES+XOR 解密、WXGF 容器自动转码为完整原图），`--media-video` 顺带复制视频（明文 mp4）
+- **语音导出（v2.1 新增，全 Python 原生）**：`export_voice.py` 从 `media_*.db` 的 `VoiceInfo` 表提取语音（SILK v3 BLOB，不落文件系统），用 `pysilk`（pip 安装的 Python 库）解码为 24kHz WAV——零 exe、零微信 DLL、零第三方服务，转文字留可插拔后端接口
 - **图片密钥全自动提取**：扫微信进程内存中的登录态整数 code（常驻，无需用户操作）→ 派生 AES 密钥 → 模板验证 → 保存复用。实测 #[MOTHER] 私聊 1758 张图片 10 秒内全部解密成功
 
 ## 环境要求
@@ -51,11 +52,14 @@ python wx_export.py --user "联系人备注" --outdir "D:/微信群导出"
 python wx_export.py --media all --outdir "D:/媒体导出"
 python wx_export.py --media "联系人" --media-video --outdir "D:/媒体导出"
 
-# 4. 顺带产出统计底座库（wechat-group-digest 的前置数据）
+# 4. 导出语音为 WAV（可选：pip install silk-python）
+python export_voice.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "联系人" --out "D:/语音导出"
+
+# 5. 顺带产出统计底座库（wechat-group-digest 的前置数据）
 python wx_export.py --group "群名" --outdir "D:/微信群导出" \
     --sqlite "D:/微信群导出/wechat_stats.db"
 
-# 5. 辅助命令
+# 6. 辅助命令
 python wx_export.py --list-groups     # 列出全部群名（确认群名用）
 python wx_export.py --list-contacts   # 列出全部联系人（确认备注名用）
 python wx_export.py --purge           # 删除缓存（密钥+解密库，敏感）
@@ -76,6 +80,7 @@ wechat-group-export/
 │   ├── export_group_md.py       # 解密库 → 按群/私聊导出 Markdown（含发信人身份双重校验）
 │   ├── extract_image_key.py     # 图片密钥自动提取（扫登录态 code 派生，全自动）
 │   ├── export_media.py          # 媒体导出（图片 V2 解密 + WXGF 转码 + 视频复制）
+│   ├── export_voice.py          # 语音导出（VoiceInfo 表提取 + pysilk 解码为 WAV）
 │   ├── media_common.py          # 媒体解密共享库（AES-ECB/V2/模板扫描/WXGF，零依赖）
 │   ├── cnb_push.sh              # 推本仓到 CNB（自动注入正确 token + 绕开失效代理）
 │   └── wcdb_key_tool_windows.py # 密钥校验/解密函数（源自 TANGandXue/wcdb-key-tool，MIT）
