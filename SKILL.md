@@ -64,7 +64,7 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | 需要 | 说明 |
 |---|---|
 | Python 3.10+ | 任意本机 Python（脚本零第三方依赖） |
-| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py` |
+| 本技能 `scripts/` 全部脚本 | `extract_keys_413.py`（数据库密钥提取+破解）、`export_group_md.py`（群/私聊导出）、`extract_image_key.py`（图片密钥自动提取）、`export_media.py`（媒体导出）、`media_common.py`（共享库）；v2.1+ 语音 `export_voice.py`、v2.2+ 媒体索引 `export_media_index.py`、文件 `export_files.py`；**v2.3+ 新增**：朋友圈 `export_sns.py`、收藏 `export_favorite.py`、服务号 `export_biz.py`、转账红包小程序 `export_transfer.py`、聊天搜索 `search_messages.py`、增量导出 `export_incremental.py`；**v2.4+ 新增**：统计分析台 `chat_stats.py`、群素材包 `digest_source.py` |
 | `wcdb_key_tool_windows.py` | 密钥校验/解密函数来源（GitHub: TANGandXUE/wcdb-key-tool，MIT）。若本技能 scripts 未带，从该仓库取 |
 | zstandard（**实际必需**） | 解压压缩消息。`WCDB_CT_message_content=4` 或以 `\x28\xb5\x2f\xfd` 开头的消息都靠它。实测压缩占比很高（某读书群 161/201=**80%**、某时间管理群 496/1833=27%），**不装的话这些内容全变成 `[压缩未解]` 占位符**。1.8MB wheel，装隔离 venv |
 | sqlite3 / hashlib / ctypes | 全部标准库 |
@@ -400,7 +400,13 @@ python scripts/export_transfer.py --dec "<dec>" --kind transfer --out "转账.md
 python scripts/search_messages.py --dec "<dec>" --keyword "微信"
 python scripts/search_messages.py --dec "<dec>" --keyword "合同" --session "项目群" --last 7d
 python scripts/search_messages.py --dec "<dec>" --keyword "转账" --limit 20 --out 搜索结果.md
+# v2.4 新增 --type：按消息类型在结果侧过滤（不改 FTS 查询）
+python scripts/search_messages.py --dec "<dec>" --keyword "面试" --type text     # 只看文本
+python scripts/search_messages.py --dec "<dec>" --keyword "合同" --type link      # 只看链接/文件/小程序
 ```
+
+`--type` 取值：`text/image/voice/video/sticker/location/link/file/system`。按 `local_type` 低位（`& 255`）在拿到 FTS 结果后筛，**不改动原有 FTS 查询逻辑**。
+注意：① `system` 是整值哨兵（10000/10002，不取低位——10000&255=16 会错）；② `link`/`file` 低位同是 49（appmsg），低位无法再分，要区分"文件 vs 链接"需另解 appmsg XML；③ FTS 索引只收录文本类内容（文本/名片/位置/appmsg），图片/语音/视频/系统消息本身不在 FTS 里，按这些类型搜关键词自然为 0，属正常。
 
 ### 增量导出（export_incremental.py）
 
@@ -417,6 +423,94 @@ python scripts/export_incremental.py --dec "<dec>" --session "群名" --out "导
 - 红包金额本地库不存（`<feedesc>` 全空），属微信设计，需走「账单」导出。
 - 转账 paysubtype 仅能区分 1=发起/3=已收；已退款/已过期本机样本未覆盖，标"未解析(paysubtype=N)"。
 - 跨平台（macOS/Linux）适配可行性见 `docs/CROSS_PLATFORM.md`；wcdb-key-tool 三平台源码研究见 `docs/WCDB_KEY_TOOL_RESEARCH.md`。
+
+
+## 聊天统计与群素材包（v2.4）
+
+> 两个纯增量脚本，都只读 `--dec` 指向的已解密库，**不改现有任何导出脚本**（`search_messages.py` 仅加 `--type`，其余行为不变）。
+> 发信人解析与分库合并逻辑直接复用 `export_group_md`（同目录 import），时间过滤统一走 `media_common`。
+> 本机实测：`Python百鸽笼` 群近 30 天 26790 条，chat_stats 加载 2~3s，digest_source 产出 messages.json 约 8.4MB。
+
+### 聊天统计台（chat_stats.py）
+
+对指定一个群/联系人输出 Markdown 报告：消息总数（有效/系统两口径）、类型分布表、发言排行 Top N、按小时活跃分布、按日活跃分布（活跃天数/日均/峰值日）、时间跨度。
+
+```bash
+python scripts/chat_stats.py --dec "<dec>" --session "群名或联系人"
+python scripts/chat_stats.py --dec "<dec>" --username "xxx@chatroom" --last 30d --top 15
+python scripts/chat_stats.py --dec "<dec>" --session "晓东" --since 2026-08-01 --until 2026-09-01
+python scripts/chat_stats.py --dec "<dec>" --session "群名" --out "统计.md"          # 写文件而非 stdout
+python scripts/chat_stats.py --dec "<dec>" --session "群名" --no-zstd              # 跳过 zstd 解压（快；发信人仅用本库 Name2Id）
+```
+
+- `--session` 优先当群名（只在 `@chatroom` 里找），没命中再放宽到联系人（私聊）；`--username` 精确指定。
+- 类型标签按 `local_type` 低位归类：`1` 文本/`3` 图片/`34` 语音/`43` 视频/`47` 表情/`48` 位置/`49` 链接文件小程序；`10000/10002` 整值哨兵（系统/撤回，不取低位）；`266287972401` 拍一拍、`244813135921` 复合按整值特判。
+- 排行只统计有效消息（系统/撤回/拍一拍无发信人，不参与）。
+
+### 群素材包（digest_source.py）
+
+对指定群 + 时间范围，在 `--outdir/<会话名>/sources/` 下生成一套机器可读 + 人可读素材包，供下游知识库/群刊/AI 提炼消费：
+
+```bash
+python scripts/digest_source.py --dec "<dec>" --session "群名" --outdir "D:/素材包"
+python scripts/digest_source.py --dec "<dec>" --session "群名" --outdir "D:/素材包" --last 30d
+python scripts/digest_source.py --dec "<dec>" --username "xxx@chatroom" --outdir "D:/素材包" --since 2026-08-01
+```
+
+产出三件：
+
+| 文件 | 内容 |
+|---|---|
+| `sources/messages.json` | 机器可读：每条消息 `ts/time/sender/sender_disp/type_low/type/is_system/content`；正文截断 200 字，大群不把整库塞进单文件 |
+| `sources/stats.json` | 与 chat_stats 同源的统计（总数/类型分布/发言排行/24h 分布/每日分布/跨度） |
+| `sources/material.md` | 人可读素材稿：话题概述、发言排行、关键消息摘录（有效文本里正文最长的 N 条） |
+
+- 与 chat_stats 共用 `load_messages`/`compute_stats`，统计口径同源。
+- `--excerpts N` 控制关键消息摘录条数（默认 15）；`--no-zstd` 同 chat_stats。
+
+
+## 跨平台（macOS / Linux，v2.4 已落地为代码）
+
+> 路线图结论见 `docs/CROSS_PLATFORM.md`。本节说"代码已怎么接、平台怎么分、哪些真跑过哪些没"。
+> 本机是 **Windows**：所有 darwin/linux 代码只做了语法/import/逻辑走查，**未在 mac/linux 真机跑过**，
+> 严禁对外声称"mac 真机已通过"。
+
+### 平台分支表（按 `sys.platform` 自动切，上层零改动）
+
+| 能力 | win32 | darwin (macOS) | linux |
+|------|-------|----------------|-------|
+| AES-256-CBC（整库） | bcrypt.dll CNG | CommonCrypto `CCCrypt` | OpenSSL EVP（libcrypto） |
+| AES-128-ECB（图片区） | bcrypt.dll CNG | CommonCrypto `CCCrypt`（ECB 模式位） | OpenSSL EVP（`EVP_aes_128_ecb`） |
+| 数据目录探测 | ini → 数据根 → `xwechat_files/<wxid>/db_storage` | `~/Library/Containers/com.tencent.xinWeChat/Data/Documents/xwechat_files/<wxid>/db_storage` | `~/.local/share/com.tencent.wechat/xwechat_files/<wxid>/db_storage` |
+| 找微信进程 | `tasklist Weixin.exe` | `pgrep -x WeChat` | 遍历 `/proc/*/exe` 找结尾 `/wechat` |
+| 进程内存枚举/读 | `VirtualQueryEx`+`ReadProcessMemory` | `mach_vm_region`+`mach_vm_read` | `/proc/<pid>/maps`+`/proc/<pid>/mem` |
+| 取数据库密钥 | `extract_keys_413.py`（XOR blob 破解，本机实测） | `extract_keys_macos.py`（内存扫 raw key / LLDB 断 `CCKeyDerivationPBKDF`，**可选 Frida 备选**） | `extract_keys_linux.py`（ELF 锚点串 + GDB，仅 x86_64） |
+| 图片密钥内存扫 | `media_common` kernel32 三件套 | 同上（task_for_pid 版） | 同上（/proc 版） |
+| WXGF 未查看原图 | `VoipEngine.dll` → jpg | 在 `WeChat.app/Contents/Frameworks` 找 dylib 调 `wxam_dec_wxam2pic_5`（【推断，未真机】） | **降级**：官方 Linux 不附带解码库，未查看原图不可用，已查看的明文图/视频不受影响 |
+| 语音 SILK→WAV | pysilk | `pip install silk-python`（代码无需改） | `pip install silk-python`（代码无需改） |
+
+### 前置条件（macOS）
+```
+sudo codesign --force --deep --sign - /Applications/WeChat.app   # 去 Hardened Runtime（微信更新后可能要重签）
+xcode-select --install                                          # 提供 lldb
+# 以 root 运行：task_for_pid / lldb attach 需要
+sudo python3 scripts/extract_keys_macos.py extract
+# 首次抓 passphrase：微信内 退出登录 → 重新登录 触发
+```
+可选增强（非必装）：`pip install frida frida-tools`，装了优先用 Frida hook `CCKeyDerivationPBKDF`（参考 yichen-wechat-local-vault 思路），没装或失败自动回落 LLDB。
+
+### 前置条件（Linux，仅 x86_64）
+```
+sudo apt install gdb libssl-dev
+echo 0 | sudo tee /proc/sys/kernel/yama/ptrace_scope   # 或直接 sudo 跑
+sudo python3 scripts/extract_keys_linux.py extract      # 首次需退出重登触发
+```
+
+### 验证级别（务必如实标注）
+- 【已验证 = Windows 真机回归】：`aes_backend` win32 后端（含 FIPS-197 AES-128-ECB 已知答案向量、真实解密库 search/sns/favorite 回归）、`media_common` 在 win32 走原 kernel32/bcrypt 路径、`wx_export.detect_db_dir()` 在 Windows 正常定位。
+- 【代码级验证，未真机 = mac/linux】：`aes_backend` 的 darwin(CCCrypt)/linux(EVP) 后端、`extract_keys_macos.py`、`extract_keys_linux.py`、`media_common` 的 darwin/linux 内存分支、WXGF macOS dylib 定位。均只在 Windows 上 `py_compile` + import + 逻辑走查，未真机。
+- WXGF macOS dylib：【推断，未真机】——微信 4.x 跨平台共用 WCDB/图片解码代码，推断存在同名导出符号，但未在 mac 真机核对具体 dylib 名。
+- Linux ARM：不支持（ELF 分析硬校验 x86_64）。
 
 
 ## 踩坑实录（按遇到顺序）

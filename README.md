@@ -1,8 +1,10 @@
-# wechat-group-export · 微信聊天记录导出（群聊 / 私聊 / 媒体 / 语音，Windows）
+# wechat-group-export · 微信聊天记录导出（群聊 / 私聊 / 媒体 / 语音，Windows 实测 + macOS/Linux 跨平台代码）
 
-从微信 Windows 4.x 的本地加密数据库提取密钥、解密，把指定群聊/私聊导出为 Markdown，并把图片/视频等媒体解密导出的工具链。**数据库密钥与图片密钥均从进程内存自动提取**（图片密钥由登录态 code 派生，全自动、无需打开图片）；**零第三方依赖即可完成提取+解密**；解压富文本消息需 zstandard（1.8MB）。
+从微信 4.x 的本地加密数据库提取密钥、解密，把指定群聊/私聊导出为 Markdown，并把图片/视频等媒体解密导出的工具链。**数据库密钥与图片密钥均从进程内存自动提取**；**零第三方加密依赖即可完成提取+解密**（AES 走系统库：Windows `bcrypt.dll` / macOS CommonCrypto / Linux OpenSSL）；解压富文本消息需 zstandard（1.8MB）。
 
-> 实测环境：Windows + 微信 4.1.13.63，非管理员权限，自动探测数据目录（绿色版/安装版均可）。
+> 实测环境：**Windows + 微信 4.1.13.63，非管理员权限**（全流程真跑过）。
+> **macOS / Linux 已落地为跨平台代码**（按 `sys.platform` 自动分支），但本机是 Windows，
+> mac/linux 代码只做了语法/import/逻辑走查，**未在 mac/linux 真机跑过**——详见文末「跨平台」与致谢。
 
 ## 特性
 
@@ -22,17 +24,23 @@
 - **收藏导出（v2.3）**：解析 `favorite/favorite.db`，按 11 种 type 分组渲染（文字/图片/语音/视频/链接/位置/文件/合并转发/笔记/小程序/视频号）
 - **服务号文章导出（v2.3）**：独立库 `biz_message_0.db`，zstd 解压后按公众号分组导出标题/摘要/原文链接（实测 414 个号 / 20384 篇）
 - **转账/红包/小程序导出（v2.3）**：扫 49 类 appmsg，按子类型分流——转账解析金额/备注/收付款状态，红包导出祝福语+发送人（金额微信本地不存），小程序提取 appid/标题
-- **聊天搜索（v2.3）**：直接复用微信自带 FTS5 索引（约 120 万行），关键词/会话/时间过滤，0.2s 级
+- **聊天搜索（v2.3）**：直接复用微信自带 FTS5 索引（约 120 万行），关键词/会话/时间过滤，0.2s 级；v2.4 加 `--type` 按消息类型（text/image/voice/video/link/file/system 等）结果侧过滤
 - **增量导出（v2.3）**：状态文件记录上次导出位置，只追加新增消息，重复运行不重复导出
-- **跨平台研究（v2.3）**：见 `docs/CROSS_PLATFORM.md`（macOS/Linux 可行性表）与 `docs/WCDB_KEY_TOOL_RESEARCH.md`
+- **聊天统计台（v2.4）**：`chat_stats.py` 对指定群/私聊输出 Markdown 统计——消息总数（有效/系统两口径）、类型分布、发言排行 Top N、按小时/按日活跃分布、时间跨度
+- **群素材包（v2.4）**：`digest_source.py` 一键产出知识库素材包 `messages.json`（逐条摘要，截断 200 字）+ `stats.json`（同源统计）+ `material.md`（话题概述/发言排行/关键摘录），供下游群刊/AI 提炼消费
+- **跨平台（v2.4 已落地为代码）**：同一套代码按 `sys.platform` 自动分支——AES 后端抽到 `scripts/aes_backend.py`（win=bcrypt / macOS=CommonCrypto CCCrypt / Linux=OpenSSL EVP），数据目录/找进程/内存读取/密钥提取全部三平台化。**Windows 行为逐字节不变、本机真跑回归；macOS/Linux 为代码级移植，未真机**。路线图见 `docs/CROSS_PLATFORM.md`、研究见 `docs/WCDB_KEY_TOOL_RESEARCH.md`。
 
 ## 环境要求
 
 | 需要 | 说明 |
 |---|---|
-| Windows + 微信 4.x | 实测 **4.1.13.63**；4.1.13.x 同系列应可运行，其他版本见「支持范围」 |
-| Python 3.10+ | Windows 版 |
+| Windows + 微信 4.x | 实测 **4.1.13.63**；4.1.13.x 同系列应可运行，其他版本见「支持范围」。**本机真跑回归** |
+| macOS（可选，未真机） | 微信 4.x for Mac；前置 `sudo codesign --force --deep --sign - /Applications/WeChat.app` + `xcode-select --install` + root；代码级移植 |
+| Linux（可选，未真机，仅 x86_64） | 官方原生微信 4.x；前置 `sudo apt install gdb libssl-dev` + root/放开 ptrace_scope；ARM 不支持 |
+| Python 3.10+ | Windows / macOS / Linux |
 | zstandard | `python -m pip install zstandard`。没装不报错，但压缩消息会显示为 `[压缩未解]` 占位符（实测约 80% 富文本消息被压缩，属刚需） |
+| silk-python（语音，跨平台） | `python -m pip install silk-python`；mac/linux 同样用它解码语音，代码无需改 |
+| frida（macOS 可选增强，非必装） | `pip install frida frida-tools`：mac 上优先用 Frida hook `CCKeyDerivationPBKDF` 抓 passphrase；不装则走默认 LLDB/cTypes 路线 |
 
 ## 快速开始
 
@@ -84,7 +92,12 @@ python export_favorite.py --dec "C:/Users/xxx/.wxcache/decrypted" --out "D:/导�
 python export_biz.py --dec "C:/Users/xxx/.wxcache/decrypted" --out "D:/导出/公众号文章.md"
 python export_transfer.py --dec "C:/Users/xxx/.wxcache/decrypted" --out "D:/导出/转账红包小程序.md"
 python search_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --keyword "关键词"
+python search_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --keyword "关键词" --type text   # v2.4 按类型过滤
 python export_incremental.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "群名" --out "D:/导出/群名.md"
+
+# 8. v2.4 新模块：统计台 + 群素材包（都基于已解密库）
+python chat_stats.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "群名" --last 30d         # 统计 Markdown 报告
+python digest_source.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "群名" --outdir "D:/素材包" --last 30d
 ```
 
 脚本遵循**程序与数据分离**：不写死任何机器路径。首次运行约 30s~8min（扫描内存提密钥），之后秒级。
@@ -101,7 +114,18 @@ wechat-group-export/
 │   ├── extract_image_key.py     # 图片密钥自动提取（扫登录态 code 派生，全自动）
 │   ├── export_media.py          # 媒体导出（图片 V2 解密 + WXGF 转码 + 视频复制）
 │   ├── export_voice.py          # 语音导出（VoiceInfo 表提取 + pysilk 解码为 WAV）
-│   ├── media_common.py          # 媒体解密共享库（AES-ECB/V2/模板扫描/WXGF，零依赖）
+│   ├── media_common.py          # 媒体解密共享库（AES-ECB/V2/模板扫描/WXGF，零依赖；内存扫描已三平台抽象）
+│   ├── aes_backend.py           # 【跨平台】AES 后端抽象（win=bcrypt / mac=CommonCrypto / linux=OpenSSL EVP）
+│   ├── extract_keys_macos.py    # 【跨平台·未真机】macOS 密钥提取（task_for_pid+mach_vm_read / LLDB，可选 Frida）
+│   ├── extract_keys_linux.py    # 【跨平台·未真机】Linux 密钥提取（ELF 锚点串 + GDB，仅 x86_64）
+│   ├── export_sns.py            # 朋友圈导出（v2.3）
+│   ├── export_favorite.py       # 收藏导出（v2.3）
+│   ├── export_biz.py            # 服务号文章（v2.3）
+│   ├── export_transfer.py       # 转账/红包/小程序（v2.3）
+│   ├── search_messages.py       # FTS 聊天搜索（v2.3；v2.4 加 --type 类型过滤）
+│   ├── export_incremental.py    # 增量导出（v2.3）
+│   ├── chat_stats.py            # 聊天统计台（v2.4：类型分布/发言排行/小时日活跃）
+│   ├── digest_source.py         # 群素材包（v2.4：messages.json + stats.json + material.md）
 │   ├── cnb_push.sh              # 推本仓到 CNB（自动注入正确 token + 绕开失效代理）
 │   └── wcdb_key_tool_windows.py # 密钥校验/解密函数（源自 TANGandXue/wcdb-key-tool，MIT）
 └── LICENSE
@@ -145,6 +169,10 @@ MIT。内嵌 `scripts/wcdb_key_tool_windows.py` 源自 [TANGandXue/wcdb-key-tool
 | [WeChatDataAnalysis](https://github.com/WeChatDataAnalysis/WeChatDataAnalysis) | ① 图片密钥派生：`md5(code+wxid)[:16]` + `xor=code&0xFF`，code 从进程内存扫描；② V2 dat 结构（15B 头：magic + aes_size + xor_size + pad）；③ WXGF 用 `VoipEngine.dll` 的 `wxam_dec_wxam2pic_5` 转码；④ SILK→WAV 转码 | 图片解密（`media_common.py` / `extract_image_key.py`）、WXGF 转码 | 其语音下载依赖第三方付费服务 wxcdn.c3o.re（配额/兑换码）——**本仓库评估后未采用**，改为本地 VoiceInfo 直取 |
 | [0xlane/wechat-dump-rs](https://github.com/0xlane/wechat-dump-rs) | 密钥从运行中微信进程提取、数据库自动解密的 Rust 工具；`media_*.db` 存语音的提示 | 总体思路印证 | 存续 |
 | [TANGandXue/wcdb-key-tool](https://github.com/TANGandXue/wcdb-key-tool) | 数据库密钥校验/解密函数（`verify_enc_key` / 库文件 HMAC 校验等）；v2.3 进一步研究其 **macOS 版 `wcdb_key_tool_macos.py`（LLDB 断点系统符号 `CCKeyDerivationPBKDF`）与 Linux 版 `wcdb_key_tool.py`（ELF 锚点串 `com.Tencent.WCDB.Config.Cipher` + GDB）**，作为跨平台取密钥路线的依据，详见 `docs/WCDB_KEY_TOOL_RESEARCH.md` / `docs/CROSS_PLATFORM.md` | `scripts/wcdb_key_tool_windows.py`（内嵌）；跨平台移植路线结论 | MIT（已在 LICENSE 登记）；其 Credits 链 kkocdko / lopleec/wxchat-export / ylytdeng/wechat-decrypt |
+| [TANGandXue/wcdb-key-tool · macOS 版](https://github.com/TANGandXue/wcdb-key-tool)（`wcdb_key_tool_macos.py`） | v2.4 **直接移植**为本仓库 `scripts/extract_keys_macos.py`：CommonCrypto `CCCrypt` AES 后端、`task_for_pid`+`mach_vm_region`+`mach_vm_read` 内存扫、LLDB 断 `CCKeyDerivationPBKDF` 抓 passphrase、mac 沙盒容器数据目录探测 | `scripts/aes_backend.py`（darwin 后端）、`scripts/extract_keys_macos.py`、`scripts/media_common.py`（darwin 内存分支） | MIT；本仓库按"一键入口"风格重排为 `extract/decrypt` CLI，逻辑逐行对应上游 |
+| [TANGandXue/wcdb-key-tool · Linux 版](https://github.com/TANGandXue/wcdb-key-tool)（`wcdb_key_tool.py`） | v2.4 **直接移植**为本仓库 `scripts/extract_keys_linux.py`：OpenSSL EVP AES 后端、ELF 静态分析锚点串定位断点（仅 x86_64）、GDB 断点抓 passphrase、`/proc/*/mem` 内存读取 | `scripts/aes_backend.py`（linux 后端）、`scripts/extract_keys_linux.py`、`scripts/media_common.py`（linux 内存分支） | MIT；同上 |
+| 跨平台 Credits 链（上游再上游，随移植一并致谢） | [kkocdko](https://kkocdko.site/post/202510212134) 的 Linux GDB 抓密钥思路；[lopleec/wxchat-export](https://github.com/lopleec/wxchat-export)；[ylytdeng/wechat-decrypt](https://github.com/ylytdeng/wechat-decrypt)；Frida hook `CCKeyDerivationPBKDF` 思路参考 yichen-wechat-local-vault | 本仓库 macOS/Linux 取密钥路线与 macOS 可选 Frida 增强的方法论来源 | 各原作者许可；本仓库仅借鉴思路、按自身需求重写 |
+| [mcncarl/yichen-skills · yichen-wechat-local-vault](https://github.com/mcncarl/yichen-skills/tree/main/yichen-wechat-local-vault) | v2.4 参考其 macOS 方案与产品设计：① `CCKeyDerivationPBKDF` 的 Frida hook 思路（本仓库作为 macOS 可选增强，默认仍走上游 LLDB/cTypes）；② 微信 4.x `local_type` 低位类型表（1文本/3图/34语音/43视频/49链接文件/10000系统）印证本仓库 `&255` 规则；③ 本地 vault/知识库组织思路——`chat_stats.py`（类型分布+发言排行+活跃时段）、`digest_source.py`（群素材包 sources/{messages.json,stats.json,material.md}）、search `--type` 过滤；④ unix 密钥/明文库 `chmod 600/700` 隐私加固 | `scripts/search_messages.py`（--type）、`scripts/chat_stats.py`、`scripts/digest_source.py`、`scripts/extract_keys_macos.py`（可选 Frida）、`scripts/aes_backend.py` | 仅借鉴思路与类型表，未照抄其 Frida 注入代码（与本仓库"默认纯 cTypes、不强制第三方加密依赖"设计一致） |
 | [wxcdn.c3o.re](https://wxcdn.c3o.re)（第三方 CDN Worker） | 语音/媒体代下载服务契约（token/配额/redeem/download 端点），见 WeChatDataAnalysis `cdn_image_service.py` | **评估后未采用**：需上传微信 `global_config` 鉴权、配额付费、稳定性/隐私不可控 | 第三方服务，非开源 |
 | wechat-cli / wechat-smart-organizer（本机 skill） | 命令式导出思路 | **评估后未采用**：PyPI/GitHub 无对应包，命令全为空中楼阁（SKILL.md 踩坑#1/#16） | — |
 
