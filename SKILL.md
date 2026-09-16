@@ -248,6 +248,11 @@ python export_media.py --account-dir "D:/微信数据/xwechat_files/<wxid>" \
 
 - 解码用 **pysilk**（`pip install silk-python`，cffi 绑定的 Python 库）——不下载 exe、
   不调微信 DLL、不绑微信版本。`--voice` 时懒加载，缺失时提示安装。
+- **语音消息正文列是 zstd 压缩的 `<voicemsg>` 元数据 XML**（时长/格式/CDN 引用，**不是语音内容**，
+  语音本体在 VoiceInfo 表已单独解成 WAV）。`--with-zstd` 解开后 Markdown 显示时长：
+  - 新版结构带 `length=毫秒` → `[语音 15s]`（精确）
+  - 旧版结构只有 `voicelength=字节`（SILK 约 1KB/s）→ `[语音 ~4s]`（估算，标 ~）
+  - 无论哪种结构，voicemsg XML **绝不泄漏进 Markdown**（审计：6353 条语音行 XML 残留=0）
 - 依赖解密库（语音在解密后的 media_*.db，不像图片那样独立于 DB 密钥）。
 
 ```bash

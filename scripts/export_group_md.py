@@ -138,12 +138,14 @@ def main():
         sys.exit("[x] 需要 --group 群名关键词，或 --username 精确群 ID")
 
     voice_map = {}
+    voice_root = None   # voice_map.json 所在 <导出根>/语音/，wav 路径相对 <导出根>
     if args.voice_map:
         import json as _json
         if not os.path.isfile(args.voice_map):
             sys.exit(f"[x] voice-map 文件不存在: {args.voice_map}")
         with open(args.voice_map, encoding="utf-8") as f:
             voice_map = _json.load(f)
+        voice_root = os.path.dirname(os.path.dirname(os.path.abspath(args.voice_map)))
         print(f"[i] 语音时间线映射已加载: {sum(len(v) for v in voice_map.values())} 条")
 
     contact_db = find_file(args.dec, "contact.db")
@@ -318,9 +320,37 @@ def main():
             sender_u = sender_u or p
             # 明文存储的富文本 XML 同样走摘要（审计 E8：不依赖"富文本必被压缩"的实测规律）
             if text.lstrip().startswith("<"):
-                title, des = rich_text_summary(text)
-                if title or des:
-                    text = f"[{label}] " + " | ".join(x for x in (title, des) if x)
+                # 语音消息正文 = voicemsg 元数据 XML（zstd 压缩）：只提取时长，别把整段 XML 倒进 Markdown。
+                # 三种结构：① length=毫秒（精确）；② 仅 voicelength=字节（SILK 约 1KB/s 估算，标 ~）；
+                #   ③ voice_map 命中时用 WAV 头实测。任一带 <voicemsg 都不得泄漏 XML。
+                is_voice = bool(re.search(r"<voicemsg", text))
+                vm = re.search(r"<voicemsg[^>]*\blength\s*=\s*\"(\d+)\"", text)
+                if vm:
+                    sec = int(vm.group(1)) / 1000
+                    text = f"[语音 {sec:.0f}s]" if sec >= 1 else "[语音]"
+                elif is_voice and voice_root and v is not None and v.get("wav"):
+                    wav_p = os.path.join(voice_root, v["wav"])
+                    if os.path.isfile(wav_p):
+                        try:
+                            with open(wav_p, "rb") as wf:
+                                wf.seek(40)
+                                dsz = int.from_bytes(wf.read(4), "little")
+                            text = f"[语音 {dsz / 48000:.0f}s]"
+                        except Exception:
+                            text = "[语音]"
+                    else:
+                        text = "[语音]"
+                elif is_voice:
+                    vl = re.search(r"<voicemsg[^>]*voicelength\s*=\s*\"(\d+)\"", text)
+                    if vl:
+                        sec = int(vl.group(1)) / 1000
+                        text = f"[语音 ~{sec:.0f}s]" if sec >= 1 else "[语音]"
+                    else:
+                        text = "[语音]"
+                else:
+                    title, des = rich_text_summary(text)
+                    if title or des:
+                        text = f"[{label}] " + " | ".join(x for x in (title, des) if x)
         text = (text or "").replace("\r", "").strip()
         # 发信人：内容前缀（真身）> 本库 Name2Id。绝不用全局 name2id 兜底（小号雷区，踩坑#20）
         u = sender_u or r["local_u"]
@@ -333,6 +363,7 @@ def main():
             lines.append(f"- `{t}` 系统: {text[:160]}")
         else:
             # 语音消息嵌入 WAV 路径（--voice-map）：同一时间源 create_time，可直接对应聊天时间
+            v = None
             if mt == 34 and voice_map:
                 v = voice_map.get(md5, {}).get(str(r.get("server_id") or ""))
                 if v:
