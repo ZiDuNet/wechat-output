@@ -166,6 +166,8 @@ def collect_messages(dec, since_ts, until_ts, include_groups, include_private,
         except Exception:
             n2i = {}
         all_n2i_users.update(n2i.values())
+        # 每库构建一次 known_users（表间不增长）；避免每条消息重建 2.6 万元素集合（性能踩坑）
+        known_users = set(nick) | all_n2i_users
         n_tbl = n_hit = n_row = 0
 
         for t in tables:
@@ -218,7 +220,7 @@ def collect_messages(dec, since_ts, until_ts, include_groups, include_private,
                         dec_t = try_zstd(content)
                         if dec_t:
                             dec_t = dec_t.replace("\r\n", "\n")
-                            sender_u, dec_t = split_prefix(dec_t, set(nick) | all_n2i_users)
+                            sender_u, dec_t = split_prefix(dec_t, known_users)
                             text = dec_t
                         else:
                             text = f"[{label}·压缩未解]"
@@ -233,7 +235,7 @@ def collect_messages(dec, since_ts, until_ts, include_groups, include_private,
                 # 明文分支也剥前缀（群内他人消息真身）
                 if isinstance(text, str):
                     text = text.replace("\r\n", "\n")
-                    p, text = split_prefix(text, set(nick) | all_n2i_users)
+                    p, text = split_prefix(text, known_users)
                     sender_u = sender_u or p
                     text = display_content(text, mt, label)
                 text = (text or "").strip()

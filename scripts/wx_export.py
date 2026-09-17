@@ -67,6 +67,7 @@ SEARCH = os.path.join(HERE, "search_messages.py")
 EXPORT_INCREMENTAL = os.path.join(HERE, "export_incremental.py")
 EXPORT_DAY_DIGEST = os.path.join(HERE, "export_day_digest.py")
 EXPORT_ALL_SESSIONS = os.path.join(HERE, "export_all_sessions.py")
+EXPORT_SENDER_MESSAGES = os.path.join(HERE, "export_sender_messages.py")
 WATCH_MESSAGES = os.path.join(HERE, "watch_messages.py")
 
 # 缓存默认位置（敏感：含解密库+密钥），用 --cache 可改。
@@ -356,6 +357,8 @@ def main():
     ap.add_argument("--all-sessions", action="store_true",
                     help="v2.4: 跨全部会话(群+私聊)按时间批量导出汇总（--outdir 必填，"
                          "透传 --last/--since/--until；输出<outdir>/全部会话汇总.md + 可选底座）")
+    ap.add_argument("--sender-messages", action="append", metavar="wxid",
+                    help="v2.7: 按发送者精确直查（可重复指定多个 wxid；--outdir 必填，输出 SQLite 底座）")
     ap.add_argument("--watch", metavar="会话名",
                     help="监听指定群/联系人新消息（只读解密缓存；--outdir 必填）")
     ap.add_argument("--watch-all", action="store_true",
@@ -393,6 +396,7 @@ def main():
                                ("--search", args.search), ("--incremental", args.incremental),
                                ("--digest", args.digest),
                                ("--all-sessions", args.all_sessions),
+                               ("--sender-messages", args.sender_messages),
                                ("--watch", args.watch), ("--watch-all", args.watch_all)) if on]
     if not actions:
         sys.exit("[x] 需要指定动作之一：--group / --user / --media / --list-groups / --list-contacts / "
@@ -495,6 +499,7 @@ def main():
                            ("--search", args.search), ("--incremental", args.incremental),
                            ("--digest", args.digest),
                            ("--all-sessions", args.all_sessions),
+                           ("--sender-messages", args.sender_messages),
                            ("--watch", args.watch), ("--watch-all", args.watch_all)) if on]
     if v23:
         module_version = "v2.6" if args.watch or args.watch_all else "v2.3"
@@ -537,6 +542,14 @@ def main():
             out_js = os.path.join(args.outdir, "全部会话汇总_底座.json")
             run([EXPORT_ALL_SESSIONS, "--dec", dec, "--out", out_md,
                  "--sqlite", out_db, "--json", out_js] + _time([]))
+        elif args.sender_messages:
+            # v2.7：按发送者精确直查（SQL 层 WHERE real_sender_id IN，不做全量中转）。
+            # 输出同源 SQLite 底座（sessions/messages/meta/verify_suspicious），供上层做个人画像/单方统计
+            out_db = os.path.join(args.outdir, "按发送者直查_底座.db")
+            cmd = [EXPORT_SENDER_MESSAGES, "--dec", dec, "--out", out_db]
+            for w in args.sender_messages:
+                cmd += ["--sender", w]
+            run(cmd + _time([]))
         elif args.digest:
             # v2.5：全天跨会话梳理包（群+私聊，逐会话文件+小时分节+引用/转账/红包细分+_总览）。
             # 时间口径是 --date（不是 --since/--until/--last）；cap/merge-under 缺省值交给子脚本。

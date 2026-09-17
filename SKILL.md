@@ -582,6 +582,53 @@ python scripts/watch_messages.py --dec "<dec>" --all --since 2026-09-16 \
 行为约定：首次运行未指定 `--since` 时建立各分片当前尾部基线，不回放历史；显式 `--since` 才从该时间点开始。每条消息的水位由 `(create_time, sort_seq, local_id)` 组成，回调成功或重试耗尽后才落盘推进，因此是至少一次投递；进程在输出后立即中断时，重启可能重复最后一条。无 `--state` 时不跨重启保存水位。`wx_export.py --watch/--watch-all` 提供同样能力的一键入口，并把输出/水位放入 `--outdir`。
 
 
+## 按发送者精确直查（v2.7，export_sender_messages.py）
+
+> 场景：只要某个发送者（通常是自己）发的消息——做个人发言画像 / 单方审计 / 发言统计，
+> 别全量导出再在结果里筛。SQL 层直接 `WHERE real_sender_id IN (rids)` 精准取数。
+
+### 架构：从消息出发，按 rid 过滤直查，会话只做命名（与 all-sessions 同向、更省）
+
+1. 只遍历 message/message_<N>.db（N 为数字 0..8；biz_message/media_*/message_fts 同前缀库一律排除）。
+2. 每个分库只开【一次】连接：一次列出该库全部 `Msg_` 表名，一次读出该库 Name2Id。
+3. 对每张 `Msg_<md5(username)>` 表直接跑 SQL：
+   `WHERE real_sender_id IN (目标rids) [AND create_time 范围]`——没命中自然 0 行，不进结果。
+4. 跨库去重沿用 (时间, rid, 内容哈希) 键，只与前面的库比。
+
+### 发送者身份的三条不变量（务必理解，否则会导错人）
+
+1. **rid 每库各自为政**：同一 wxid 在 message_0..8.db 的 Name2Id 里 rowid 可能不同，
+   必须逐库读该库 Name2Id 解析目标 wxid 的 rid，绝不可拿 A 库的 rid 去 B 库过滤。
+2. **内容前缀 > 本库 Name2Id**：群内他人消息真身是内容前缀 `<发信人>:\n`；目标发送者自己发的消息
+   理论上【不应该】带他人前缀。出现开头前缀 = 疑似误配，`--verify` 会把它们收集进报告。
+3. **跨库去重**：同一消息可能被多分库重复收录，按 (create_time, real_sender_id, 内容哈希)
+   与前面库比对去重。
+
+### 用法
+
+```bash
+# 一键入口（推荐，走 dec 缓存；--outdir 必填）：
+#   产出 <outdir>/按发送者直查_底座.db（sessions / messages / meta / verify_suspicious 四表）
+python scripts/wx_export.py --sender-messages <本人wxid> --outdir "D:/画像"
+
+# 直接跑（调试；多个 --sender 合并为"任一命中"）
+python scripts/export_sender_messages.py --dec "<dec>" --sender <本人wxid> --out 我的发言.db
+python scripts/export_sender_messages.py --dec "<dec>" --sender <wxid> --last 7d --out 近7天.md
+python scripts/export_sender_messages.py --dec "<dec>" --sender <wxid> --session "项目群" --out 项目群.db
+python scripts/export_sender_messages.py --dec "<dec>" --sender <wxid> --verify --out 校验.json
+```
+
+时间过滤三件套 `--since/--until/--last` 与全局一致；`--session` 接受显示名片段（唯一匹配）；
+`--verify` 收集"开头带他人前缀"的消息（疑似误配）写入输出（SQLite 的 verify_suspicious 表 / JSON 的 verify_rows 段）。
+
+### 实测（本机 Windows / 微信 4.1.13）
+
+全库约 142 万行、跨 11 个 message_<N>.db、1475 张 Msg_ 表，直查本人 142,434 条有效消息约 **2.6s**
+（含 zstd 解压与写库）。消息开头带他人真身前缀者 **0 条**——rid 直查无真身级误配。
+曾踩坑：循环内每次调用 split_prefix 时重建 2.6 万元素 known_users 集合，14 万条消息累积成 196s；
+改为每库构建一次后 2.6s（约 75 倍）。export_all_sessions 已同步此优化。
+
+
 ## 跨平台（macOS / Linux，v2.4 已落地为代码）
 
 > 路线图结论见 `docs/CROSS_PLATFORM.md`。本节说"代码已怎么接、平台怎么分、哪些真跑过哪些没"。

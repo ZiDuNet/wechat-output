@@ -36,6 +36,7 @@
 - **跨全部会话批量导出（v2.4）**：`export_all_sessions.py` 一条命令跨全部群+私聊按时间窗（昨天/今天/近N天…）捞消息——「梳理昨天所有聊天记录给 AI 总结事项」。架构从消息出发：每个分库只开一次连接、每张 `Msg_` 表直接跑带 `create_time` 时间窗的 SQL，无命中会话自然 0 条、不逐个探测；产出按会话分组的 Markdown 汇总 + 可选 SQLite/JSON 结构化底座。本机 `--last 昨天`：1454 个真实会话、42 个有消息、3832 条约 15s
 - **全天跨会话梳理包（v2.5）**：`export_day_digest.py` 把某一天全部会话（群+私聊+文件传输助手）导成一套阅读包——`_总览.md` 统计+清单、大会话逐个一文件按小时分节、小会话可 `--merge-under` 合并成册；引用（带被引用人+摘录）、转账/红包（金额+备注）、小程序、文件均细分渲染。与 v2.4 汇总版互补（那边单文件+底座喂 AI，这边多文件给人读），同窗条数一致可交叉验证。md5 映射从 contact.db 全量构建，绝不拿 session.db 的 last_timestamp 剪枝（懒落盘会滞后，见 SKILL.md 踩坑#29）
 - **只读实时消息监听（v2.6）**：`watch_messages.py` 轮询解密后的 `message_*.db`，跨分片合并、自动发现新分片，按时间/`sort_seq`/`local_id` 复合水位增量投递；水位 JSON 可持久化，回调失败自动重试后才确认，支持 JSONL/text 输出，适合接 AI、脚本或日志管道。它不操作微信 UI，也不发送消息。
+- **按发送者精确直查（v2.7）**：`export_sender_messages.py` 只要某个发送者（通常是自己）发的消息——做个人发言画像/单方审计/发言统计。SQL 层直接 `WHERE real_sender_id IN (rids)` 按 rid 过滤直查（rid 每库各自为政、逐库解析），不做全量导出再筛；`--verify` 用内容前缀交叉校验疑似误配。本机 1475 张 Msg_ 表直查本人 142,434 条有效消息约 **2.6s**，开头带他人真身前缀 **0 条**。产出 sessions/messages/meta/verify_suspicious 四表 SQLite 底座
 - **跨平台（v2.4 已落地为代码）**：同一套代码按 `sys.platform` 自动分支——AES 后端抽到 `scripts/aes_backend.py`（win=bcrypt / macOS=CommonCrypto CCCrypt / Linux=OpenSSL EVP），数据目录/找进程/内存读取/密钥提取全部三平台化。**Windows 行为逐字节不变、本机真跑回归；macOS/Linux 为代码级移植，未真机**。路线图见 `docs/CROSS_PLATFORM.md`、研究见 `docs/WCDB_KEY_TOOL_RESEARCH.md`。
 
 ## 环境要求
@@ -119,6 +120,10 @@ python watch_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --session "群�
 python watch_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --all --since 2026-09-16 --once --state "D:/监听/listener_watermark.json"
 python wx_export.py --watch "群名" --outdir "D:/监听"                 # 一键入口，输出消息监听.jsonl
 python wx_export.py --watch-all --watch-once --outdir "D:/监听"       # 全部会话只轮询一轮
+
+# 11. v2.7 按发送者精确直查（只取某个人发的消息，如本人发言画像/单方审计）
+python wx_export.py --sender-messages <本人wxid> --outdir "D:/画像"     # 一键入口，产出按发送者直查_底座.db
+python export_sender_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --sender <本人wxid> --verify --out 我的发言.db
 ```
 
 ## 只读实时消息监听（v2.6，watch_messages.py）
@@ -169,6 +174,7 @@ wechat-group-export/
 │   ├── export_all_sessions.py   # 跨全部会话按时间批量导出（v2.4：Markdown 汇总 + SQLite/JSON 底座）
 │   ├── export_day_digest.py     # 全天跨会话梳理包（v2.5：总览 + 逐会话文件按小时分节 + 引用/转账/红包细分）
 │   ├── watch_messages.py        # 只读实时监听（v2.6：跨分片增量 + 持久化水位 + JSONL/text）
+│   ├── export_sender_messages.py # 按发送者精确直查（v2.7：SQL 层 rid 过滤 + 交叉校验）
 │   ├── cnb_push.sh              # 推本仓到 CNB（自动注入正确 token + 绕开失效代理）
 │   └── wcdb_key_tool_windows.py # 密钥校验/解密函数（源自 TANGandXue/wcdb-key-tool，MIT）
 └── LICENSE
