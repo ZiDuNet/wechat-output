@@ -77,6 +77,87 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 
 **不需要**：`wechat-cli` pip 包（PyPI 上不存在，别装）、`pycryptodome`（Windows 走系统 bcrypt.dll）、管理员权限（非管理员可读同用户微信进程内存，实测）。
 
+### 可选依赖（增强功能）
+
+| 需要 | 说明 | 用途 |
+|---|---|---|
+| pysqlcipher3 | `pip install pysqlcipher3` | **首选**直连加密库，免解密到磁盘 |
+| sqlcipher | `apt install sqlcipher` / `brew install sqlcipher` | CLI 回退方案，pysqlcipher3 不可用时用 |
+
+## v3.0 架构增强：直连加密库 + 高级查询
+
+> v3.0 引入 `wcdb_core.py` 统一数据库访问层，**直连加密库**替代先解密到磁盘的旧方案。
+> 旧方案保留为降级备选。
+
+### 数据库访问架构
+
+```
+旧方案（降级备选）：
+  extract_keys → decrypt_all(decrypted/) → sqlite3.connect(明文.db)
+
+新方案（首选）：
+  extract_keys → pysqlcipher3.connect(加密.db, key=enc_key)
+                  ↓
+              wcdb_core.WcdbSession 统一入口
+                  ↓
+    ┌─────────────┼─────────────┐
+    │             │             │
+  查询模块    搜索模块    统计模块
+```
+
+### 新增模块清单
+
+| 模块 | 功能 | CLI |
+|---|---|---|
+| `wcdb_core.py` | 统一数据库访问层（pysqlcipher3 / sqlcipher CLI / 明文降级三后端） | `python wcdb_core.py info/query/scan` |
+| `search_fts5.py` | FTS5 全文搜索（比 LIKE 快 100x+） | `python search_fts5.py --query "关键词"` |
+| `cursor_fetch.py` | 游标分批拉取（大群不 OOM） | `python cursor_fetch.py --session "群名" --batch 500` |
+| `contacts.py` | 联系人/群组查询（昵称/备注/成员/头像） | `python contacts.py contact/search/members/groups/stats` |
+| `hardlink.py` | 硬链接解析（图片/视频 md5 → 实际路径） | `python hardlink.py image/video/list-dbs` |
+| `db_health.py` | 数据库健康检查（完整性/分片/大小） | `python db_health.py --quick` |
+| `exec_query.py` | 通用 SQL 执行器（任意 SQL 查加密库） | `python exec_query.py query "SELECT ..."` |
+| `anti_revoke.py` | 消息反撤回（⚠️ 可选，修改数据库） | `python anti_revoke.py install/check/restore` |
+| `stats.py` | 统计分析（总览/会话/聚合） | `python stats.py overview/session/aggregate` |
+
+### 用法示例
+
+```python
+# 直连加密库查询
+from wcdb_core import WcdbSession
+with WcdbSession(db_dir="db_storage", enc_key="64hex...") as db:
+    rows = db.query("SELECT * FROM contact LIMIT 10")
+
+# FTS5 全文搜索
+from search_fts5 import FtsSearcher
+with FtsSearcher("db_dir", enc_key="64hex...") as s:
+    results = s.search("关键词", session_id="xxx@chatroom")
+
+# 游标分批拉取
+from cursor_fetch import MessageCursor
+with MessageCursor("db_dir", enc_key="64hex...", session_id="xxx@chatroom") as c:
+    for batch in c.batches(batch_size=500):
+        for msg in batch:
+            process(msg)
+
+# 联系人查询
+from contacts import ContactManager
+with ContactManager("db_dir", enc_key="64hex...") as cm:
+    contact = cm.get_contact("wxid_xxx")
+    members = cm.get_group_members("xxx@chatroom")
+
+# 数据库健康检查
+from db_health import DbHealthChecker
+with DbHealthChecker("db_dir", enc_key="64hex...") as checker:
+    report = checker.full_check()
+```
+
+### 降级策略
+
+当 pysqlcipher3 和 sqlcipher 均不可用时，自动降级为旧方案：
+1. `extract_keys_413.py` 提取密钥（不变）
+2. `wcdb_key_tool_windows.py decrypt` 解密到磁盘（不变）
+3. 各导出脚本读明文 .db（不变）
+
 ## 一键用法（推荐，日常只记这条）
 
 `wx_export.py` 把 Step 0~4 串成一条命令：**自动探测数据目录 + 缓存复用 + 安全消歧 + 失效自愈**。

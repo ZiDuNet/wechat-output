@@ -124,6 +124,49 @@ python wx_export.py --watch-all --watch-once --outdir "D:/监听"       # 全部
 # 11. v2.7 按发送者精确直查（只取某个人发的消息，如本人发言画像/单方审计）
 python wx_export.py --sender-messages <本人wxid> --outdir "D:/画像"     # 一键入口，产出按发送者直查_底座.db
 python export_sender_messages.py --dec "C:/Users/xxx/.wxcache/decrypted" --sender <本人wxid> --verify --out 我的发言.db
+
+# 12. v3.0 直连加密库 + 高级查询（无需解密到磁盘）
+# 需要 pysqlcipher3（pip install pysqlcipher3）或 sqlcipher（apt install sqlcipher）
+
+# 查看数据库信息
+python wcdb_core.py info <db_path> --key <64hex密钥>
+
+# 执行任意 SQL
+python wcdb_core.py query <db_path> "SELECT * FROM contact LIMIT 10" --key <64hex密钥>
+
+# FTS5 全文搜索（比 LIKE 快 100x+）
+python search_fts5.py --db-dir <db_storage> --key <密钥> --query "关键词" --ensure-index
+
+# 游标分批拉取大群消息（不 OOM）
+python cursor_fetch.py --db-dir <db_storage> --key <密钥> --session "群名" --batch 500
+
+# 联系人查询
+python contacts.py contact <username> --db-dir <db_storage> --key <密钥>
+python contacts.py search "关键词" --db-dir <db_storage> --key <密钥>
+python contacts.py members <chatroom_id> --db-dir <db_storage> --key <密钥>
+python contacts.py groups --db-dir <db_storage> --key <密钥>
+python contacts.py stats --db-dir <db_storage> --key <密钥>
+
+# 硬链接解析
+python hardlink.py image <md5> --db-dir <db_storage> --key <密钥>
+python hardlink.py video <md5> --db-dir <db_storage> --key <密钥>
+
+# 数据库健康检查
+python db_health.py --db-dir <db_storage> --key <密钥>
+python db_health.py --db-dir <db_storage> --key <密钥> --quick
+
+# 统计分析
+python stats.py overview --db-dir <db_storage> --key <密钥>
+python stats.py session <session_id> --db-dir <db_storage> --key <密钥>
+
+# 通用 SQL 执行器
+python exec_query.py query "SELECT * FROM contact" --db-dir <db_storage> --key <密钥>
+python exec_query.py tables --db-dir <db_storage> --key <密钥>
+python exec_query.py search "message" --db-dir <db_storage> --key <密钥>
+
+# 反撤回（⚠️ 可选，会修改数据库，建议先备份）
+python anti_revoke.py --db-dir <db_storage> --key <密钥> install --session <session_id>
+python anti_revoke.py --db-dir <db_storage> --key <密钥> check
 ```
 
 ## 只读实时消息监听（v2.6，watch_messages.py）
@@ -175,6 +218,15 @@ wechat-group-export/
 │   ├── export_day_digest.py     # 全天跨会话梳理包（v2.5：总览 + 逐会话文件按小时分节 + 引用/转账/红包细分）
 │   ├── watch_messages.py        # 只读实时监听（v2.6：跨分片增量 + 持久化水位 + JSONL/text）
 │   ├── export_sender_messages.py # 按发送者精确直查（v2.7：SQL 层 rid 过滤 + 交叉校验）
+│   ├── wcdb_core.py             # 【v3.0】统一数据库访问层（pysqlcipher3 直连加密库 / sqlcipher CLI / 明文降级）
+│   ├── search_fts5.py           # 【v3.0】FTS5 全文搜索（比 LIKE 快 100x+）
+│   ├── cursor_fetch.py          # 【v3.0】游标分批拉取（大群不 OOM）
+│   ├── contacts.py              # 【v3.0】联系人/群组查询（昵称/备注/成员/头像）
+│   ├── hardlink.py              # 【v3.0】硬链接解析（图片/视频 md5 → 实际路径）
+│   ├── db_health.py             # 【v3.0】数据库健康检查（完整性/分片/大小）
+│   ├── exec_query.py            # 【v3.0】通用 SQL 执行器（任意 SQL 查加密库）
+│   ├── anti_revoke.py           # 【v3.0·可选】消息反撤回（⚠️ 会修改数据库）
+│   ├── stats.py                 # 【v3.0·可选】统计分析（总览/会话/聚合）
 │   ├── cnb_push.sh              # 推本仓到 CNB（自动注入正确 token + 绕开失效代理）
 │   └── wcdb_key_tool_windows.py # 密钥校验/解密函数（源自 TANGandXue/wcdb-key-tool，MIT）
 └── LICENSE
