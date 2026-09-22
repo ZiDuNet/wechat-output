@@ -15,12 +15,13 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
 from datetime import datetime
 
-from wcdb_core import WcdbSession, load_keys, get_db_key_for_file
+from wcdb_core import WcdbSession, find_session_table, load_keys, get_db_key_for_file, name2id_col
 
 
 class StatsAnalyzer:
@@ -50,6 +51,14 @@ class StatsAnalyzer:
                 if name.startswith("message") and name.endswith(".db") and not name.endswith(("-wal", "-shm")):
                     dbs.append(os.path.join(root, name))
         return sorted(dbs)
+
+    @staticmethod
+    def _name2id_col(db) -> str | None:
+        """name2id 列名兼容（user_name / username）"""
+        return name2id_col(db)
+
+    def _find_session_table(self, db, session_id: str) -> str | None:
+        return find_session_table(db, session_id)
 
     def get_overview(self) -> dict:
         """获取总览统计"""
@@ -120,56 +129,53 @@ class StatsAnalyzer:
                 continue
             try:
                 with WcdbSession(db_path=db_path, enc_key=key) as db:
-                    tables = db.query(
-                        "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
-                    )
-                    for t in tables:
-                        tbl = t["name"]
-                        # 按类型统计
-                        try:
-                            rows = db.query(f"""
-                                SELECT local_type, COUNT(*) as cnt
-                                FROM {tbl}
-                                WHERE real_sender_id IN (SELECT rowid FROM name2id WHERE username = ?)
-                                GROUP BY local_type
-                            """, (session_id,))
-                            for r in rows:
-                                tp = r["local_type"]
-                                result["by_type"][tp] = result["by_type"].get(tp, 0) + r["cnt"]
-                                result["total_messages"] += r["cnt"]
-                        except Exception:
-                            pass
+                    tbl = self._find_session_table(db, session_id)
+                    if not tbl:
+                        continue
+                    col = self._name2id_col(db)
+                    # 按类型统计（会话表 = 该会话全部消息，不再按发送者 rid 过滤）
+                    try:
+                        rows = db.query(f"""
+                            SELECT local_type, COUNT(*) as cnt
+                            FROM {tbl}
+                            GROUP BY local_type
+                        """)
+                        for r in rows:
+                            tp = r["local_type"]
+                            result["by_type"][tp] = result["by_type"].get(tp, 0) + r["cnt"]
+                            result["total_messages"] += r["cnt"]
+                    except Exception:
+                        pass
 
-                        # 按发送者统计
+                    # 按发送者统计（真实发送者 rid -> username）
+                    if col:
                         try:
                             rows = db.query(f"""
-                                SELECT n.username, COUNT(*) as cnt
+                                SELECT n.{col} AS username, COUNT(*) as cnt
                                 FROM {tbl} m
                                 JOIN name2id n ON m.real_sender_id = n.rowid
-                                WHERE n.username = ?
-                                GROUP BY n.username
-                            """, (session_id,))
+                                GROUP BY n.{col}
+                            """)
                             for r in rows:
                                 result["by_sender"][r["username"]] = r["cnt"]
                         except Exception:
                             pass
 
-                        # 时间范围
-                        try:
-                            rows = db.query(f"""
-                                SELECT MIN(create_time) as first_ts, MAX(create_time) as last_ts
-                                FROM {tbl}
-                                WHERE real_sender_id IN (SELECT rowid FROM name2id WHERE username = ?)
-                            """, (session_id,))
-                            if rows and rows[0].get("first_ts"):
-                                first = rows[0]["first_ts"]
-                                last = rows[0]["last_ts"]
-                                if first and (not result["time_range"]["first"] or first < result["time_range"]["first"]):
-                                    result["time_range"]["first"] = first
-                                if last and (not result["time_range"]["last"] or last > result["time_range"]["last"]):
-                                    result["time_range"]["last"] = last
-                        except Exception:
-                            pass
+                    # 时间范围（全表）
+                    try:
+                        rows = db.query(f"""
+                            SELECT MIN(create_time) as first_ts, MAX(create_time) as last_ts
+                            FROM {tbl}
+                        """)
+                        if rows and rows[0].get("first_ts"):
+                            first = rows[0]["first_ts"]
+                            last = rows[0]["last_ts"]
+                            if first and (not result["time_range"]["first"] or first < result["time_range"]["first"]):
+                                result["time_range"]["first"] = first
+                            if last and (not result["time_range"]["last"] or last > result["time_range"]["last"]):
+                                result["time_range"]["last"] = last
+                    except Exception:
+                        pass
             except Exception:
                 continue
 
@@ -195,38 +201,38 @@ class StatsAnalyzer:
             "by_weekday": {d: 0 for d in range(7)},
         }
 
+        wanted = set(session_ids) if session_ids else None
         for db_path in self._find_message_dbs():
             key = self._get_key(db_path)
             if not key:
                 continue
             try:
                 with WcdbSession(db_path=db_path, enc_key=key) as db:
+                    # 表名 md5 反查会话名
+                    col = self._name2id_col(db)
+                    session_map = {}
+                    if col:
+                        for r in db.query(f"SELECT {col} AS u FROM name2id"):
+                            u = r.get("u")
+                            if u:
+                                session_map[hashlib.md5(u.encode("utf-8")).hexdigest()] = u
                     tables = db.query(
                         "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
                     )
                     for t in tables:
                         tbl = t["name"]
+                        sname = session_map.get(tbl[4:].lower(), tbl)
+                        if wanted is not None and sname not in wanted:
+                            continue
                         try:
-                            if session_ids:
-                                placeholders = ",".join("?" * len(session_ids))
-                                rows = db.query(f"""
-                                    SELECT n.username, m.local_type, m.create_time, COUNT(*) as cnt
-                                    FROM {tbl} m
-                                    JOIN name2id n ON m.real_sender_id = n.rowid
-                                    WHERE n.username IN ({placeholders})
-                                    GROUP BY n.username, m.local_type, m.create_time
-                                """, tuple(session_ids))
-                            else:
-                                rows = db.query(f"""
-                                    SELECT n.username, m.local_type, m.create_time, COUNT(*) as cnt
-                                    FROM {tbl} m
-                                    JOIN name2id n ON m.real_sender_id = n.rowid
-                                    GROUP BY n.username, m.local_type, m.create_time
-                                """)
+                            rows = db.query(f"""
+                                SELECT local_type, create_time, COUNT(*) as cnt
+                                FROM {tbl}
+                                GROUP BY local_type, create_time
+                            """)
                             for r in rows:
                                 result["total_messages"] += r["cnt"]
-                                session = r["username"]
-                                result["by_session"][session] = result["by_session"].get(session, 0) + r["cnt"]
+                                result["by_session"][sname] = result["by_session"].get(sname, 0) + r["cnt"]
                                 tp = r["local_type"]
                                 result["by_type"][tp] = result["by_type"].get(tp, 0) + r["cnt"]
                                 if r["create_time"]:

@@ -91,7 +91,10 @@ class WcdbSession:
         db_path: str | None = None,
         enc_key: str | None = None,
         wxid: str | None = None,
+        readonly: bool = True,
     ):
+        """readonly=True 以只读方式打开（默认，避免干扰正在运行的微信）；
+        readonly=False 允许写入（仅 FTS 建索引 / 显式 execute 等确有写需求时使用）"""
         self._conn = None
         self._backend = backend_name()
         self._db_dir = db_dir
@@ -99,6 +102,7 @@ class WcdbSession:
         self._db_path = db_path
         self._enc_key = enc_key
         self._wxid = wxid
+        self._readonly = readonly
 
         # 验证参数
         if not any([db_dir, dec_dir, db_path]):
@@ -137,13 +141,17 @@ class WcdbSession:
             )
 
     def _connect_pysqlcipher3(self, db_path: str):
-        """pysqlcipher3 直连"""
-        self._conn = sqlcipher.connect(db_path)
+        """pysqlcipher3 直连：默认只读（避免干扰正在运行的微信），可显式开写"""
+        if self._readonly:
+            uri = "file:" + os.path.abspath(db_path).replace(os.sep, "/") + "?mode=ro"
+            self._conn = sqlcipher.connect(uri, uri=True)
+        else:
+            self._conn = sqlcipher.connect(db_path)
         self._conn.row_factory = sqlcipher.Row
         key_hex = self._enc_key if self._enc_key.startswith("x'") else f"x'{self._enc_key}'"
         for param, val in SQLCIPHER_PARAMS.items():
             self._conn.execute(f"PRAGMA {param} = {val}")
-        self._conn.execute(f"PRAGMA key = {key_hex}")
+        self._conn.execute(f'PRAGMA key = "{key_hex}"')
         # 验证密钥
         try:
             self._conn.execute("SELECT count(*) FROM sqlite_master")
@@ -263,6 +271,37 @@ class WcdbSession:
 # ============================================================
 # 工具函数
 # ============================================================
+
+def name2id_col(db) -> str | None:
+    """探测 name2id 的用户名列（user_name / username，微信不同版本列名不同）"""
+    for c in db.query("PRAGMA table_info(name2id)"):
+        if c["name"] in ("user_name", "username"):
+            return c["name"]
+    return None
+
+
+def find_session_table(db, session_id: str) -> str | None:
+    """按会话名定位消息表。
+
+    优先按主链 export_group_md 的规律：Msg_<md5(会话名)>；
+    表名不是 md5 命名时（测试库/旧库），遍历 Msg 表用 name2id 反查兜底。
+    """
+    import hashlib
+    tbl = f"Msg_{hashlib.md5(session_id.encode('utf-8')).hexdigest()}"
+    if db.query("SELECT name FROM sqlite_master WHERE type='table' AND name = ?", (tbl,)):
+        return tbl
+    col = name2id_col(db)
+    if col:
+        session_map = {}
+        for r in db.query(f"SELECT {col} AS u FROM name2id"):
+            u = r.get("u")
+            if u:
+                session_map[hashlib.md5(u.encode("utf-8")).hexdigest()] = u
+        for t in db.query("SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"):
+            if session_map.get(t["name"][4:].lower()) == session_id:
+                return t["name"]
+    return None
+
 
 def find_db_files(db_dir: str) -> dict[str, list[str]]:
     """扫描 db_storage 目录，返回 {类别: [路径列表]}"""

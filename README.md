@@ -134,8 +134,14 @@ python wcdb_core.py info <db_path> --key <64hex密钥>
 # 执行任意 SQL
 python wcdb_core.py query <db_path> "SELECT * FROM contact LIMIT 10" --key <64hex密钥>
 
-# FTS5 全文搜索（比 LIKE 快 100x+）
-python search_fts5.py --db-dir <db_storage> --key <密钥> --query "关键词" --ensure-index
+# FTS5 全文搜索 —— 读微信自带 FTS 索引（只读，不建索引、不改库）
+# 微信 4.x 在 message/message_fts.db 维护 FTS5 索引（message_fts_v4_N，MMFtsTokenizer 分词）。
+# 标准 FTS5 未注册该分词器，MATCH 不可用；本脚本直读底层 _content 表 + LIKE 子串匹配
+# （绕过分词器，全库扫描秒级；session_id/sender_id 按 FTS 库自己的 name2id 反查显示名）。
+# message_fts.db 不存在时返回空结果 + 警告，与微信报错文案一致。
+python search_fts5.py --db-dir <db_storage> --keys <all_keys.json> --query "关键词"
+python search_fts5.py --db-dir <db_storage> --keys <all_keys.json> --query "关键词" --session "群名/昵称/username" --limit 20
+python search_fts5.py --db-dir <db_storage> --keys <all_keys.json> --query "关键词" --ensure-index   # 仅检查微信自带 FTS 是否存在
 
 # 游标分批拉取大群消息（不 OOM）
 python cursor_fetch.py --db-dir <db_storage> --key <密钥> --session "群名" --batch 500
@@ -156,13 +162,13 @@ python db_health.py --db-dir <db_storage> --key <密钥>
 python db_health.py --db-dir <db_storage> --key <密钥> --quick
 
 # 统计分析
-python stats.py overview --db-dir <db_storage> --key <密钥>
-python stats.py session <session_id> --db-dir <db_storage> --key <密钥>
+python stats.py --db-dir <db_storage> --key <密钥> overview
+python stats.py --db-dir <db_storage> --key <密钥> session <session_id>
 
 # 通用 SQL 执行器
-python exec_query.py query "SELECT * FROM contact" --db-dir <db_storage> --key <密钥>
-python exec_query.py tables --db-dir <db_storage> --key <密钥>
-python exec_query.py search "message" --db-dir <db_storage> --key <密钥>
+python exec_query.py --db-dir <db_storage> --key <密钥> query "SELECT * FROM contact"
+python exec_query.py --db-dir <db_storage> --key <密钥> tables
+python exec_query.py --db-dir <db_storage> --key <密钥> search "message"
 
 # 反撤回（⚠️ 可选，会修改数据库，建议先备份）
 python anti_revoke.py --db-dir <db_storage> --key <密钥> install --session <session_id>
@@ -219,7 +225,7 @@ wechat-group-export/
 │   ├── watch_messages.py        # 只读实时监听（v2.6：跨分片增量 + 持久化水位 + JSONL/text）
 │   ├── export_sender_messages.py # 按发送者精确直查（v2.7：SQL 层 rid 过滤 + 交叉校验）
 │   ├── wcdb_core.py             # 【v3.0】统一数据库访问层（pysqlcipher3 直连加密库 / sqlcipher CLI / 明文降级）
-│   ├── search_fts5.py           # 【v3.0】FTS5 全文搜索（比 LIKE 快 100x+）
+│   ├── search_fts5.py           # 【v3.0】全文搜索（直连加密库，读微信自带 FTS 索引，只读不建索引）
 │   ├── cursor_fetch.py          # 【v3.0】游标分批拉取（大群不 OOM）
 │   ├── contacts.py              # 【v3.0】联系人/群组查询（昵称/备注/成员/头像）
 │   ├── hardlink.py              # 【v3.0】硬链接解析（图片/视频 md5 → 实际路径）

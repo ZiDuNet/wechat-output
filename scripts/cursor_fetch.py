@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import sys
@@ -23,7 +24,7 @@ import time
 from datetime import datetime
 from typing import Iterator
 
-from wcdb_core import WcdbSession, find_db_files, load_keys, get_db_key_for_file
+from wcdb_core import WcdbSession, find_db_files, find_session_table, load_keys, get_db_key_for_file
 
 
 class MessageCursor:
@@ -64,7 +65,7 @@ class MessageCursor:
         return sorted(dbs)
 
     def _find_session_table(self, db: WcdbSession) -> str | None:
-        """在数据库中查找会话对应的消息表"""
+        """在数据库中查找会话对应的消息表（Msg_<md5(会话名)>，与主链 export_group_md 一致）"""
         if not self._session_id:
             # 没有指定会话，返回第一个消息表
             tables = db.query(
@@ -72,35 +73,15 @@ class MessageCursor:
             )
             return tables[0]["name"] if tables else None
 
-        # 先在 Name2Id 中查找会话对应的 rowid
-        name2id_rows = db.query(
-            "SELECT rowid, username FROM name2id WHERE username = ?",
-            (self._session_id,)
-        )
-        if not name2id_rows:
-            return None
-        rowid = name2id_rows[0]["rowid"]
-
-        # 查找消息表
-        tables = db.query(
-            "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'Msg_%'"
-        )
-        for t in tables:
-            tbl = t["name"]
-            # 检查这个表是否包含该会话的消息
-            count = db.query(f"SELECT COUNT(*) as cnt FROM {tbl} WHERE sort_seq > 0 LIMIT 1")
-            if count and count[0]["cnt"] > 0:
-                return tbl
-        return tables[0]["name"] if tables else None
+        return find_session_table(db, self._session_id)
 
     def _build_sql(self, table: str) -> tuple[str, list]:
         """构建分页查询 SQL"""
         conditions = []
         params: list = []
 
-        if self._session_id:
-            conditions.append("real_sender_id IN (SELECT rowid FROM name2id WHERE username = ?)")
-            params.append(self._session_id)
+        # 会话表本身即该会话的全部消息，不再按 real_sender_id 过滤
+        # （群聊消息的 real_sender_id 是成员 rid，不是会话 rid，原写法对群聊恒为 0 条）
 
         if self._begin_ts:
             conditions.append("create_time >= ?")
@@ -162,9 +143,6 @@ class MessageCursor:
                         continue
                     conditions = []
                     params: list = []
-                    if self._session_id:
-                        conditions.append("real_sender_id IN (SELECT rowid FROM name2id WHERE username = ?)")
-                        params.append(self._session_id)
                     if self._begin_ts:
                         conditions.append("create_time >= ?")
                         params.append(self._begin_ts)
@@ -184,6 +162,25 @@ class MessageCursor:
 
     def __exit__(self, *args):
         pass
+
+
+def _content_to_text(content) -> str:
+    """消息内容转可读文本（bytes 可能是 zstd 压缩或原始字节，JSON 输出需先转 str）"""
+    if content is None:
+        return ""
+    if isinstance(content, bytes):
+        if content[:4] == b"\x28\xb5\x2f\xfd":  # zstd magic
+            return "[zstd 压缩，需 zstandard 解压]"
+        return content.decode("utf-8", errors="replace")
+    return str(content)
+
+
+def _json_safe(row: dict) -> dict:
+    """把记录中所有 bytes 值转 str（message_content / source 等列在微信里可能是原始字节）"""
+    out = {}
+    for k, v in row.items():
+        out[k] = _content_to_text(v) if isinstance(v, bytes) else v
+    return out
 
 
 def main():
@@ -213,13 +210,13 @@ def main():
         total += len(batch)
         if args.json:
             for msg in batch:
-                print(json.dumps(msg, ensure_ascii=False))
+                print(json.dumps(_json_safe(msg), ensure_ascii=False))
         else:
             for msg in batch:
                 ts = msg.get("create_time", 0)
                 ts_str = datetime.fromtimestamp(ts).strftime("%Y-%m-%d %H:%M") if ts else "?"
                 sender = msg.get("real_sender_id", "?")
-                content = (msg.get("message_content") or "")[:80]
+                content = _content_to_text(msg.get("message_content"))[:80]
                 print(f"[{ts_str}] {sender}: {content}")
         if not args.json:
             print(f"  ... 已拉取 {total} 条", file=sys.stderr)

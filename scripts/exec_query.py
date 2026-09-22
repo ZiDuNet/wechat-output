@@ -69,7 +69,7 @@ class SqlExecutor:
         if not key:
             raise RuntimeError(f"找不到密钥: {db_path}")
 
-        with WcdbSession(db_path=db_path, enc_key=key) as db:
+        with WcdbSession(db_path=db_path, enc_key=key, readonly=False) as db:
             return db.execute(sql, params)
 
     def _find_any_db(self) -> str | None:
