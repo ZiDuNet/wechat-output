@@ -124,6 +124,7 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | `sender_profile.py` | 会话主理人画像（发送者TOP/时段/星期/类型） | `python sender_profile.py --db-dir <db_storage> --keys <all_keys.json> --session <username> --md` |
 | `wx_accounts.py` | 多账号识别与隔离（list/isolate keys） | `python wx_accounts.py --db-dir <xwechat_files> --keys <all_keys.json> list` |
 | `msg_reader.py` | 通用消息读取共享库（被上面模块复用，无 CLI） | `from msg_reader import MessageReader` |
+| `chat_analysis.py` | **聊天深度分析（v3.2.0+，可固化周期报告）**：总览/类型/时间/话题/互动关系/榜单（总榜/互动/邻近度/复读/口头禅/关键词词云），群与私聊通用，输出单文件 HTML+JSON | `python chat_analysis.py --db-dir <db_storage> --keys <all_keys.json> --session <username\|群名\|昵称> [--since 2026-08-01] [--until 2026-08-31] [--out 分析.html] [--top 10] [--json]` |
 
 ### 用法示例
 
@@ -174,6 +175,19 @@ HtmlExporter("db_dir", enc_key="64hex...").export(
 from media_archive import MediaArchiver
 print(MediaArchiver("db_dir", enc_key="64hex...").archive(
     "out/媒体", session_id="xxx@chatroom"))
+
+# 聊天深度分析（v3.2.0+，群/私聊通用，只读）——可固化的周期报告引擎（日报/周报/月报/自定义）
+# CLI：python chat_analysis.py --db-dir <db_storage> --keys <all_keys.json> \
+#         --session "北清路TT" --period monthly --out-dir <报告目录> --json
+#   --period daily(今天) | weekly(近7天) | monthly(近30天) | custom(--since/--until)
+#   --sessions "群A,群B,wxid_xxx" 逗号分隔批量；--out-dir 自动命名 <显示名>_<周期>_<YYYYMMDD>.html
+# 输出 ChatLab 风格单文件 HTML：总览(指标卡/类型/成员分布) · 洞察(类型+文本深度/时间+热力图/话题演变/互动网络) ·
+# 榜单(发言总榜/@互动/邻近度矩阵+对榜/复读/口头禅/含笑量/关键词纯CSS词云)；同前缀 .json 存全量分析数据。
+from chat_analysis import ChatAnalyzer
+az = ChatAnalyzer("db_dir", keys_file="all_keys.json")
+username, display = az.resolve_session("北清路TT")     # 群名/昵称 → username
+data = az.scan(username, begin_ts=..., end_ts=..., top=10)   # 返回全量统计 dict
+# HTML 生成：from chat_analysis import build_html; build_html(data, display, 10, "monthly", generated)
 ```
 
 ### 降级策略
