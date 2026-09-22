@@ -569,6 +569,33 @@ def _section(sid, title, note, body, emoji=""):
             f'<p class="sec-note">{note}</p></div>{body}</section>')
 
 
+def _css_heatmap(title, row_labels, col_labels, matrix, unit="条", note=""):
+    """纯 CSS 网格热力图（零 JS 依赖，ECharts 兼容性差的浏览器也稳定渲染）"""
+    n_rows = len(matrix)
+    n_cols = len(matrix[0]) if matrix else 0
+    maxv = max((max(r) for r in matrix), default=1) or 1
+    cells = []
+    for i in range(n_rows):
+        for j in range(n_cols):
+            v = matrix[i][j]
+            a = (0.05 + 0.90 * (v / maxv)) if v else 0.0
+            cells.append(
+                f'<div class="hm-cell" style="background:rgba(238,69,103,{a:.2f})" '
+                f'title="{_esc(col_labels[j])} {_esc(row_labels[i])} · {v} {unit}"></div>')
+    col_head = "".join(f'<div class="hm-c hm-col" title="{_esc(c)}">{_esc(c)}</div>' for c in col_labels)
+    rows = []
+    for i in range(n_rows):
+        start = i * n_cols
+        rows.append(f'<div class="hm-r">{_esc(row_labels[i])}</div>'
+                    + "".join(cells[start:start + n_cols]))
+    cols_css = f"38px repeat({n_cols},1fr)"
+    return (f'<div class="hm"><div class="hm-hd"><div class="hm-t">{_esc(title)}</div>'
+            f'<div class="hm-bar"><span>0</span><i></i><span>{maxv:,}</span></div></div>'
+            f'<div class="hm-grid" style="grid-template-columns:{cols_css}">'
+            f'<div class="hm-c"></div>{col_head}{"".join(rows)}</div>'
+            f'<div class="hm-ft">{_esc(note)}</div></div>')
+
+
 def build_html(data: dict, display: str, top: int, period: str, generated: str) -> str:
     d = data
     weeks = list(d["topic_weeks"].keys())
@@ -634,6 +661,15 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
     nm = d.get("members")
     member_note = f"群成员 {nm} 人 · " if nm else ""
 
+    hw_heat = _css_heatmap(
+        "活跃热力图（小时 × 星期）",
+        [f"{i:02d}" for i in range(24)], ["周一", "周二", "周三", "周四", "周五", "周六", "周日"],
+        d["hw_matrix"], "条",
+        "色深=该小时段当日消息量；悬停查看精确数值。")
+    inti_heat = _css_heatmap(
+        "邻近度矩阵（前 20 成员两两互动）",
+        d["inti_members"], d["inti_members"], d["inti_matrix"], "分",
+        "互动亲密度 = @×1 + 引用×2 + 拍一拍×1.5；悬停查看具体成员对。")
     html = f"""<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
@@ -679,6 +715,18 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
   @media(max-width:860px){{.grid2{{grid-template-columns:1fr;}}}}
   .chart{{width:100%;height:280px;}}
   .chart.sm{{height:210px;}}
+  .hm{{padding:14px 22px 6px;}}
+  .hm-hd{{display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:10px;}}
+  .hm-t{{font-size:14px;font-weight:700;color:#111827;}}
+  .hm-bar{{display:flex;align-items:center;gap:8px;font-size:11px;color:#9ca3af;font-variant-numeric:tabular-nums;}}
+  .hm-bar i{{display:block;width:130px;height:10px;border-radius:999px;background:linear-gradient(90deg,#fce4ec,#f8a4b8,#f06292,#e91e63);}}
+  .hm-grid{{display:grid;gap:2px;width:100%;}}
+  .hm-c{{font-size:10px;color:#6b7280;text-align:center;padding:2px 0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}}
+  .hm-col{{font-weight:600;color:#374151;}}
+  .hm-r{{font-size:10px;color:#6b7280;text-align:right;padding-right:6px;line-height:1;display:flex;align-items:center;justify-content:flex-end;}}
+  .hm-cell{{border-radius:3px;height:14px;cursor:default;transition:transform .12s;}}
+  .hm-cell:hover{{transform:scale(1.5);outline:1px solid rgba(238,69,103,.65);position:relative;z-index:2;}}
+  .hm-ft{{font-size:11px;color:#9ca3af;margin-top:8px;}}
   .tp-list{{padding:16px 22px 20px;}}
   .tp{{display:flex;align-items:center;gap:12px;padding:7px 0;}}
   .tp-dot{{width:10px;height:10px;border-radius:50%;flex-shrink:0;}}
@@ -782,7 +830,7 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
       <div><div class="chart sm" id="c_hour"></div></div>
       <div><div class="chart sm" id="c_week"></div></div>
     </div>
-    <div class="chart sm" id="c_hw"></div>
+    {hw_heat}
     <div class="sec-hd"><h2 style="font-size:14px;color:#312e81">🌙 夜猫子排行</h2></div>
     {_rank_rows([{"name": r["name"], "value": r["count"], "rate": r["count"]} for r in d["night_top"]], "条")}
   </section>
@@ -815,7 +863,7 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
 
   <section class="card-sec" id="prox">
     <div class="sec-hd"><h2>🤝 邻近度排行</h2>
-      <p class="sec-note">互动亲密度 = @×1 + 引用×2 + 拍一拍×1.5；矩阵热力图 = 前 20 名成员两两互动。</p></div>
+      <p class="sec-note">互动亲密度 = @×1 + 引用×2 + 拍一拍×1.5；关系图 = 前 20 名成员两两互动。</p></div>
     <div class="chart" id="c_inti"></div>
     {_rank_rows([{"name": f'{r["from"]} ↔ {r["to"]}', "value": r["score"], "rate": r["score"]} for r in d["intimacy_top"]], "分")}
   </section>
@@ -879,30 +927,12 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
       yAxis:{{type:'value',axisLine:{{show:false}},axisTick:{{show:false}},splitLine:{{lineStyle:{{type:'dashed',color:'#e5e7eb'}}}},axisLabel:{{fontSize:10,color:'#6b7280'}}}},
       series:[{{type:'bar',data:data,itemStyle:{{color:GRAD,borderRadius:5}},barMaxWidth:34}}]}});
   }}
-  function heat(id,title,xdata,ydata,data,maxv){{
-    var c=mk(id);
-    c.setOption({{backgroundColor:'transparent',
-      title:{{text:title,left:'center',textStyle:{{color:'#111827',fontSize:15,fontWeight:700}}}},
-      tooltip:{{trigger:'item',triggerOn:'click',renderMode:'richText',confine:true,backgroundColor:'rgba(17,24,39,.92)',textStyle:{{color:'#fff',fontSize:11}}}},
-      grid:{{left:52,right:14,top:46,bottom:34,containLabel:true}},
-      xAxis:{{type:'category',data:xdata,axisLine:{{show:false}},axisTick:{{show:false}},axisLabel:{{fontSize:10,color:'#6b7280'}}}},
-      yAxis:{{type:'category',data:ydata,axisLine:{{show:false}},axisTick:{{show:false}},axisLabel:{{fontSize:10,color:'#6b7280'}}}},
-      visualMap:{{min:0,max:maxv,calculable:false,orient:'horizontal',left:'center',bottom:0,itemWidth:120,itemHeight:10,
-        inRange:{{color:['#fce4ec','#f8a4b8','#f06292','#e91e63']}},textStyle:{{fontSize:9}}}},
-      series:[{{type:'heatmap',data:data,itemStyle:{{borderColor:'#fff',borderWidth:2,borderRadius:3}},
-        label:{{show:false}},emphasis:{{itemStyle:{{shadowBlur:8,shadowColor:'rgba(0,0,0,.3)'}}}}}}]}});
-  }}
 
   pie('c_type','消息类型占比',CHART.types);
   pie('c_mem','成员水群分布',CHART.mem);
   bar('c_len','文本长度分位（字）',['P25','P50 中位','P75','P90','最长'],CHART.len);
   bar('c_hour','24 小时活跃分布（条）',CHART.hours_lbl,CHART.hours);
   bar('c_week','星期分布（条）',CHART.week_cn,CHART.week);
-  var hwData=[];
-  for(var hi=0;hi<24;hi++){{
-    for(var wj=0;wj<7;wj++){{hwData.push([wj,hi,CHART.hw[hi][wj]]);}}
-  }}
-  heat('c_hw','活跃热力图（小时 × 星期）',CHART.week_cn,CHART.hours_lbl,hwData,Math.max.apply(null,CHART.hw.map(function(r){{return Math.max.apply(null,r);}}))||1);
   bar('c_topic','话题命中条数',CHART.topics.map(function(x){{return x.name;}}),CHART.topics.map(function(x){{return x.value;}}),28);
 
   var ctw=mk('c_topicweek');
@@ -928,17 +958,48 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
       }}),
       links:CHART.graph.links}}]}});
 
-  var im=mk('c_inti');
-  var imData=[];
-  for(var mi=0;mi<CHART.inti_members.length;mi++){{
-    for(var mj=0;mj<CHART.inti_members.length;mj++){{
-      imData.push([mj,mi,CHART.inti_matrix[mi][mj]]);
+  // 邻近度力导向图（前 20 成员两两互动）
+  var cgi=mk('c_inti');
+  var iDeg=[];
+  for(var di=0;di<CHART.inti_members.length;di++){{
+    var s=0;
+    for(var dj=0;dj<CHART.inti_members.length;dj++){{s+=CHART.inti_matrix[di][dj];}}
+    iDeg.push(s);
+  }}
+  var maxDeg=Math.max.apply(null,iDeg)||1;
+  var iNodes=[];
+  for(var ni=0;ni<CHART.inti_members.length;ni++){{
+    var dv=iDeg[ni];
+    iNodes.push({{name:CHART.inti_members[ni],value:dv,
+      symbolSize:13+Math.round(dv/maxDeg*16),
+      itemStyle:{{color:dv>=maxDeg*0.6?'#f43f5e':(dv>=maxDeg*0.3?'#f59e0b':'#6366f1')}},
+      label:{{fontSize:10,fontWeight:600}}}});
+  }}
+  var iEdges=[];
+  for(var ei=0;ei<CHART.inti_members.length;ei++){{
+    for(var ej=ei+1;ej<CHART.inti_members.length;ej++){{
+      var ev=CHART.inti_matrix[ei][ej];
+      if(ev>0){{iEdges.push({{i:ei,j:ej,v:ev}});}}
     }}
   }}
-  heat('c_inti','邻近度矩阵（前 20 成员）',CHART.inti_members,CHART.inti_members,imData,
-    Math.max.apply(null,CHART.inti_matrix.map(function(r){{return Math.max.apply(null,r);}}))||1);
+  iEdges.sort(function(a,b){{return b.v-a.v;}});
+  var maxEV=iEdges.length?iEdges[0].v:1;
+  var iKeep=iEdges.slice(0,50).filter(function(e){{return e.v>=Math.max(2,Math.round(maxEV*0.2));}});
+  var iLinks=[];
+  for(var li=0;li<iKeep.length;li++){{
+    var lv=iKeep[li].v;
+    iLinks.push({{source:CHART.inti_members[iKeep[li].i],target:CHART.inti_members[iKeep[li].j],value:lv,
+      lineStyle:{{width:1+Math.round(lv/maxEV*3),opacity:0.3+lv/maxEV*0.6}}}});
+  }}
+  cgi.setOption({{backgroundColor:'transparent',
+    title:{{text:'邻近度关系图（前 20 成员两两互动）',left:'center',textStyle:{{color:'#111827',fontSize:15,fontWeight:700}}}},
+    tooltip:TPI,series:[{{type:'graph',layout:'force',roam:true,
+      label:{{show:true,fontSize:10,color:'#374151'}},
+      force:{{repulsion:300,edgeLength:[40,120],gravity:.05}},
+      lineStyle:{{color:'#f06292',curveness:.15}},
+      emphasis:{{focus:'adjacency',lineStyle:{{width:3}}}},
+      data:iNodes,links:iLinks}}]}});
 
-  // 词云：纯 CSS 错落排布
   var spans=document.querySelectorAll('#c_wc span');
   var maxC=spans.length?parseInt(spans[0].title.split('×')[1]||'1',10):1;
   for(var si=0;si<spans.length;si++){{
