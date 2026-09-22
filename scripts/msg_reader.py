@@ -140,7 +140,7 @@ class MessageReader:
             sql += " AND create_time <= ?"
             params.append(end_ts)
         if local_types:
-            sql += " AND local_type IN (%s)" % ",".join("?" * len(local_types))
+            sql += " AND (local_type & 255) IN (%s)" % ",".join("?" * len(local_types))
             params.extend(sorted(local_types))
         sql += " ORDER BY sort_seq"
         try:

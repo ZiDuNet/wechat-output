@@ -36,8 +36,9 @@ SCRIPT_INTERFACE = "CLI"
 
 try:
     sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-    from msg_reader import MessageReader
+    from msg_reader import MessageReader, msg_body
     from wcdb_core import WcdbSession
+    from appmsg_parser import parse_appmsg, pay_label
 except Exception as _e:  # pragma: no cover
     print("依赖导入失败:", _e, file=sys.stderr)
     sys.exit(2)
@@ -262,6 +263,11 @@ class ChatAnalyzer:
         night = Counter()
         day_cnt = Counter()
         hw = Counter()        # (hour, weekday) 热力图
+        pay_stats = {"transfer": {"n": 0, "received": 0, "sent": 0,
+                                  "amount_sum": 0.0, "amount_received": 0.0},
+                     "redpacket": 0, "miniprogram": 0, "finder": 0,
+                     "link": 0, "reply": 0, "video_share": 0, "canvas": 0}
+        pay_samples: list[dict] = []
 
         for r in self.reader.iter_messages(session_id=session, begin_ts=begin_ts, end_ts=end_ts):
             n_total += 1
@@ -290,6 +296,28 @@ class ChatAnalyzer:
                 media["voice"] += 1
             elif low == 49:
                 media["link"] += 1
+                info = parse_appmsg(msg_body(r))
+                if info:
+                    k = info["kind"]
+                    if k == "transfer":
+                        ps = pay_stats["transfer"]
+                        ps["n"] += 1
+                        if str(info.get("sub_type")) == "3":
+                            ps["received"] += 1
+                        else:
+                            ps["sent"] += 1
+                        m = re.search(r"([0-9]+(?:\.[0-9]+)?)", info.get("amount") or "")
+                        if m:
+                            amt = float(m.group(1))
+                            ps["amount_sum"] += amt
+                            if str(info.get("sub_type")) == "3":
+                                ps["amount_received"] += amt
+                    elif k in pay_stats:
+                        pay_stats[k] += 1
+                    if len(pay_samples) < 24:
+                        pay_samples.append({"time": dt.strftime("%m-%d %H:%M"),
+                                            "sender": src, "kind": k,
+                                            "label": pay_label(info)})
             types[type_label(lt)] += 1
 
             if lt in (10000, 10002):
@@ -315,11 +343,12 @@ class ChatAnalyzer:
 
         return self._summarize(session, texts, types, media, at_pairs, refer_pairs,
                                pat_pairs, senders, active_days, hour_cnt, week_cnt,
-                               night, day_cnt, hw, n_total, begin_ts, end_ts, top)
+                               night, day_cnt, hw, n_total, begin_ts, end_ts, top,
+                               pay_stats, pay_samples)
 
     def _summarize(self, session, texts, types, media, at_pairs, refer_pairs, pat_pairs,
                    senders, active_days, hour_cnt, week_cnt, night, day_cnt, hw,
-                   n_total, begin_ts, end_ts, top):
+                   n_total, begin_ts, end_ts, top, pay_stats=None, pay_samples=None):
         lens = sorted(len(t[2]) for t in texts)
         L = len(lens)
         if L:
@@ -498,6 +527,11 @@ class ChatAnalyzer:
             "inti_members": top_members,
             "graph_links": graph_links,
             "kw_top": kw_top,
+            "pay_stats": pay_stats or {"transfer": {"n": 0, "received": 0, "sent": 0,
+                                                     "amount_sum": 0.0, "amount_received": 0.0},
+                                        "redpacket": 0, "miniprogram": 0, "finder": 0,
+                                        "link": 0, "reply": 0, "video_share": 0, "canvas": 0},
+            "pay_samples": pay_samples or [],
         }
 
 
@@ -651,6 +685,16 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
     kw_spans = "".join(
         f'<span title="{_esc(w["word"])} × {w["count"]}" data-i="{i}">{_esc(w["word"])}</span>'
         for i, w in enumerate(d["kw_top"]))
+
+    KIND_ICON = {"transfer": "💸", "redpacket": "🧧", "miniprogram": "🧩",
+                 "finder": "📹", "link": "🔗", "reply": "💬",
+                 "video_share": "🎬", "canvas": "🖼️"}
+    pay_rows = [["时间", "发送者", "类型", "内容"]]
+    for p in d["pay_samples"]:
+        pay_rows.append([p["time"], p["sender"],
+                         KIND_ICON.get(p["kind"], "📦"), p["label"]])
+    pay_table = _table(pay_rows[0], pay_rows[1:]) if len(pay_rows) > 1 else \
+        '<div class="empty-note">该周期内未解析到转账/红包/小程序/视频号等复合消息。</div>'
 
     len_rows = [["平均长度", f'{ls["avg"]} 字', "P75 分位", f'{ls["p75"]} 字'],
                 ["中位数", f'{ls["median"]} 字', "P90 分位", f'{ls["p90"]} 字'],
@@ -828,6 +872,19 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
     </div>
     {empty_text}
     <div class="chart sm" id="c_len"></div>
+  </section>
+
+  <section class="card-sec" id="app">
+    <div class="sec-hd"><h2>🧾 洞察 · 复合消息</h2>
+      <p class="sec-note">本地 49 类复合消息深度解析：转账 / 红包 / 小程序 / 视频号 / 链接卡片。</p></div>
+    <div class="stat-grid">
+      <div class="stat"><div class="stat-ic" style="background:#16a34a1a">💸</div><div class="stat-body"><div class="stat-lb">转账</div><div class="stat-v" style="color:#16a34a">{d["pay_stats"]["transfer"]["n"]}</div><div class="stat-sb">合计 ¥{d["pay_stats"]["transfer"]["amount_sum"]:.2f}（收 {d["pay_stats"]["transfer"]["received"]} · 发 {d["pay_stats"]["transfer"]["sent"]}）</div></div></div>
+      <div class="stat"><div class="stat-ic" style="background:#dc26261a">🧧</div><div class="stat-body"><div class="stat-lb">红包</div><div class="stat-v" style="color:#dc2626">{d["pay_stats"]["redpacket"]}</div><div class="stat-sb">本地不存金额</div></div></div>
+      <div class="stat"><div class="stat-ic" style="background:#2563eb1a">🧩</div><div class="stat-body"><div class="stat-lb">小程序</div><div class="stat-v" style="color:#2563eb">{d["pay_stats"]["miniprogram"]}</div><div class="stat-sb">分享/卡片</div></div></div>
+      <div class="stat"><div class="stat-ic" style="background:#7c3aed1a">📹</div><div class="stat-body"><div class="stat-lb">视频号</div><div class="stat-v" style="color:#7c3aed">{d["pay_stats"]["finder"]}</div><div class="stat-sb">动态分享</div></div></div>
+      <div class="stat"><div class="stat-ic" style="background:#64748b1a">🔗</div><div class="stat-body"><div class="stat-lb">链接卡片</div><div class="stat-v" style="color:#64748b">{d["pay_stats"]["link"]}</div><div class="stat-sb">引用 {d["pay_stats"]["reply"]} · 视频 {d["pay_stats"]["video_share"]} · 画布 {d["pay_stats"]["canvas"]}</div></div></div>
+    </div>
+    {pay_table}
   </section>
 
   <section class="card-sec" id="time">
@@ -1019,8 +1076,8 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
   }}
 
   // 右侧锚点高亮
-  var secs=['ov','type','time','topic','rel','rank','prox','dup','catch','kw'];
-  var labels=['🏠 总览','🔬 类型','⏰ 时间','💡 话题','🕸️ 关系','🥇 总榜','🤝 邻近度','🔁 复读','🗣️ 口头禅','☁️ 关键词'];
+  var secs=['ov','type','app','time','topic','rel','rank','prox','dup','catch','kw'];
+  var labels=['🏠 总览','🔬 类型','🧾 复合','⏰ 时间','💡 话题','🕸️ 关系','🥇 总榜','🤝 邻近度','🔁 复读','🗣️ 口头禅','☁️ 关键词'];
   var ab=document.getElementById('anchors');
   for(var ai=0;ai<secs.length;ai++){{
     var a=document.createElement('a');

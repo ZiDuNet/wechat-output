@@ -123,8 +123,13 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | `media_archive.py` | 媒体批量归档（图片/视频/语音 → out/<会话>/<类型>/） | `python media_archive.py --db-dir <db_storage> --keys <all_keys.json> --out <目录> --session <username>` |
 | `sender_profile.py` | 会话主理人画像（发送者TOP/时段/星期/类型） | `python sender_profile.py --db-dir <db_storage> --keys <all_keys.json> --session <username> --md` |
 | `wx_accounts.py` | 多账号识别与隔离（list/isolate keys） | `python wx_accounts.py --db-dir <xwechat_files> --keys <all_keys.json> list` |
-| `msg_reader.py` | 通用消息读取共享库（被上面模块复用，无 CLI） | `from msg_reader import MessageReader` |
+| `msg_reader.py` | 通用消息读取共享库（被上面模块复用，无 CLI；`local_types` 按低 8 位匹配） | `from msg_reader import MessageReader` |
 | `chat_analysis.py` | **聊天深度分析（v3.2.1，可固化周期报告）**：日报/周报/月报/自定义；总览/类型/时间(CSS热力图)/话题/互动关系/榜单(总榜/@互动/邻近度力导向关系图/复读/口头禅/含笑量/关键词词云)，群与私聊通用，输出 ChatLab 风格单文件 HTML+JSON | `python chat_analysis.py --db-dir <db_storage> --keys <all_keys.json> --session <群名> --period daily|weekly|monthly|custom [--since 2026-08-01] [--until 2026-08-31] [--out-dir <目录>] [--sessions "A,B"] [--top 10] [--json]` |
+| `appmsg_parser.py` | **49 类复合消息深度解析库**（纯解析，零依赖）：转账(2000)/红包(2001)/小程序(33)/视频号(finderFeed)/链接/引用(57+refermsg)/视频分享/画布(57+canvasPage)，输入 XML 输出结构化 dict | `from appmsg_parser import parse_appmsg, pay_label` |
+| `pay_export.py` | **复合消息明细数据接口**：单会话转账/红包/小程序/视频号/链接/引用明细 JSON（默认 stdout，--out 写文件） | `python pay_export.py --db-dir <db_storage> --keys <all_keys.json> --session <群名/username> [--kind transfer,redpacket] [--last 3m] [--limit N]` |
+| `sns_export.py` | **朋友圈数据接口**：SnsTimeLine + 评论点赞 → JSON（默认）/ 高仿微信 UI HTML（--html）。图片为微信 CDN 链接（有时效，失效即占位） | `python sns_export.py --db-dir <db_storage> --keys <all_keys.json> [--last 3m] [--limit N]` / `--html --out 朋友圈.html` |
+| `favorites_export.py` | **收藏数据接口**：fav_db_item 按 type 1-20 渲染 → JSON（默认）/ 高仿微信 UI HTML（--html） | `python favorites_export.py --db-dir <db_storage> --keys <all_keys.json> [--last 1y] [--limit N]` / `--html --out 收藏.html` |
+| `chat_realtime.py` | **消息实时同步【技术底层】**：WCDB `PRAGMA data_version` 变更检测 + `create_time/sort_seq/seen` 增量拉取 + `watch()` 生成器；只提供底层，上层形态（SSE/CLI/Web）自定 | `from chat_realtime import RealtimeWatcher` → `w.latest_ts(session)` / `w.poll(session, since_ts)` / `w.watch(session)` |
 
 ### 用法示例
 
@@ -188,6 +193,37 @@ az = ChatAnalyzer("db_dir", keys_file="all_keys.json")
 username, display = az.resolve_session("北清路TT")     # 群名/昵称 → username
 data = az.scan(username, begin_ts=..., end_ts=..., top=10)   # 返回全量统计 dict
 # HTML 生成：from chat_analysis import build_html; build_html(data, display, 10, "monthly", generated)
+# 注意：data["pay_stats"] 为复合消息统计（转账/红包/小程序/视频号/链接/引用），报告含「复合消息」洞察卡片
+
+# 复合消息深度解析（49 类 appmsg；先剥发送者前缀再解析，type 在 appmsg/type 下）
+from appmsg_parser import parse_appmsg, pay_label
+info = parse_appmsg(msg_body(row))        # 需要 msg_reader.msg_body 解 zstd
+# info = {"kind": "transfer", "amount": "￥1.00", "sub_type": "3", ...}
+# kinds: transfer/redpacket/miniprogram/finder/link/reply/video_share/canvas
+
+# 复合消息明细数据接口（转账/红包/小程序/视频号/链接/引用）
+from pay_export import PayExporter
+ex = PayExporter("db_dir", keys_file="all_keys.json")
+rows = ex.fetch("北清路TT", since_ts=..., until_ts=..., kinds={"transfer", "redpacket"})
+
+# 朋友圈数据接口（JSON 结构化，默认 stdout）
+from sns_export import SnsExporter
+ex = SnsExporter("db_dir", keys_file="all_keys.json")
+posts = ex.fetch(since_ts=..., until_ts=..., limit=100)   # 每项含 time/name/desc/media/comments
+
+# 收藏数据接口（JSON 结构化，默认 stdout）
+from favorites_export import FavoritesExporter
+ex = FavoritesExporter("db_dir", keys_file="all_keys.json")
+items = ex.fetch(since_ts=..., until_ts=..., limit=100)   # type 1-20 已按规则渲染
+
+# 消息实时同步【技术底层】（上层形态自定：SSE/Web/CLI/回调）
+from chat_realtime import RealtimeWatcher
+w = RealtimeWatcher("db_dir", keys_file="all_keys.json")
+ts = w.latest_ts("53241047527@chatroom")                 # 锚点
+msgs, new_ts, seen = w.poll("53241047527@chatroom", since_ts=ts, anchor_seen=None)
+for m in w.watch("53241047527@chatroom", since_ts=ts, interval=5.0):
+    print(m["create_time"], m.get("_sender_user"), m["local_type"])
+# 变更检测：w.data_version() 返回 PRAGMA data_version（写库 +1）
 
 ### 聊天深度分析 · 实践注意事项（v3.2.1 起，过程经验固化）
 
@@ -207,6 +243,16 @@ data = az.scan(username, begin_ts=..., end_ts=..., top=10)   # 返回全量统�
    `--out-dir` 自动命名，可直接挂 cron/定时任务每日/每周/每月产出；私聊传 wxid 同样适用。
 6. **UI 参照 ChatLab**（920px 窄布局 + 彩虹环形饼图 + 主题渐变柱图 + 金银铜排名进度条 +
    右侧锚点导航 + 渐变赛季大标题 + 词云字号指数映射与字重分级）。
+7. **复合消息（49 类 appmsg）解析的坑**：① 消息正文带 `发送者wxid:\n` 前缀，先剥除再
+   `ET.fromstring`（否则解析失败）；② `<type>` 在 `appmsg/type` 下，不是根节点；
+   ③ type 2000=转账(本地存金额，paysubtype 3=已收款) / 2001=红包(本地**不存**金额) /
+   33=小程序(weappinfo.appid) / 视频号=appmsg 下 `<finderFeed>`；④ type 57 要分流：
+   带 `refermsg`=引用、带 `streamvideo`=视频分享、带 `canvasPage`=画布卡片、否则=普通链接；
+   ⑤ `msg_reader.iter_messages(local_types=...)` 按**低 8 位**匹配（微信 local_type 高位
+   携带标志，精确匹配会漏）。
+8. **朋友圈/收藏图片显示限制**：SnsTimeLine 媒体 url 为微信 CDN 短链（签名有时效，
+   过期返回 400）；本地缓存文件（cache/<月>/Sns/Img）命名是微信私有格式且需账号图片
+   AES 密钥（内存扫描），第一版不提供图片解密。导出以内容/结构/评论点赞为主。
 ```
 
 ### 降级策略
