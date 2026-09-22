@@ -657,6 +657,11 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
                 ["P25 分位", f'{ls["p25"]} 字', "最长单条", f'{ls["max"]} 字'],
                 ["短文占比（≤10字）", f'{ls["short"]}%', "长文（≥100字）", f'{ls["long"]} 条']]
 
+    empty_text = ""
+    if ls["n"] == 0:
+        empty_text = ('<div class="empty-note">该周期内暂无有效文本消息，'
+                      '文本深度/话题/关键词等文本类分析为空。</div>')
+
     wk_name = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"][d["peak_wd"]]
     nm = d.get("members")
     member_note = f"群成员 {nm} 人 · " if nm else ""
@@ -766,6 +771,7 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
   .metric{{padding:10px 12px;border-radius:12px;background:#f9fafb;}}
   .metric .v{{font-family:ui-monospace,Consolas,monospace;font-size:16px;font-weight:800;color:#ee4567;font-variant-numeric:tabular-nums;}}
   .metric .k{{font-size:11px;color:var(--sub);margin-top:2px;}}
+  .empty-note{{margin:14px 22px 20px;padding:14px 16px;border-radius:12px;background:#fdf2f4;border:1px dashed #f3a7b6;color:#be123c;font-size:13px;}}
   footer{{margin-top:30px;text-align:center;font-size:12px;color:var(--sub);line-height:2;}}
   footer .tag{{display:inline-block;border:1px solid var(--line);border-radius:999px;padding:2px 14px;margin:2px;background:#fff;}}
 </style>
@@ -820,6 +826,7 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
       <div class="metric"><div class="v">{ls["short"]}%</div><div class="k">短文占比 ≤10 字</div></div>
       <div class="metric"><div class="v">{ls["long"]}</div><div class="k">长文 ≥100 字</div></div>
     </div>
+    {empty_text}
     <div class="chart sm" id="c_len"></div>
   </section>
 
@@ -949,7 +956,7 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
     title:{{text:'互动关系网络（@ 提及）',left:'center',textStyle:{{color:'#111827',fontSize:15,fontWeight:700}}}},
     tooltip:TPI,series:[{{type:'graph',layout:'force',roam:true,
       label:{{show:true,fontSize:10,color:'#374151'}},
-      force:{{repulsion:260,edgeLength:[50,110],gravity:.08}},
+      force:{{initLayout:'circular',repulsion:260,edgeLength:[50,110],gravity:.08}},
       lineStyle:{{color:'#a5b4fc',width:1.2,opacity:.55,curveness:.12}},
       emphasis:{{focus:'adjacency',lineStyle:{{width:3}}}},
       data:CHART.graph.nodes.map(function(n){{
@@ -995,7 +1002,7 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
     title:{{text:'邻近度关系图（前 20 成员两两互动）',left:'center',textStyle:{{color:'#111827',fontSize:15,fontWeight:700}}}},
     tooltip:TPI,series:[{{type:'graph',layout:'force',roam:true,
       label:{{show:true,fontSize:10,color:'#374151'}},
-      force:{{repulsion:300,edgeLength:[40,120],gravity:.05}},
+      force:{{initLayout:'circular',repulsion:300,edgeLength:[40,120],gravity:.05}},
       lineStyle:{{color:'#f06292',curveness:.15}},
       emphasis:{{focus:'adjacency',lineStyle:{{width:3}}}},
       data:iNodes,links:iLinks}}]}});
@@ -1004,8 +1011,9 @@ def build_html(data: dict, display: str, top: int, period: str, generated: str) 
   var maxC=spans.length?parseInt(spans[0].title.split('×')[1]||'1',10):1;
   for(var si=0;si<spans.length;si++){{
     var cnt=parseInt(spans[si].title.split('×')[1]||'1',10);
-    var f=15+Math.round(cnt/maxC*30);
+    var f=16+Math.round(Math.pow(cnt/maxC,0.55)*34);
     spans[si].style.fontSize=f+'px';
+    spans[si].style.fontWeight=cnt>=maxC*0.5?'800':(cnt>=maxC*0.25?'700':'600');
     spans[si].style.color=COLORS[si%COLORS.length];
     spans[si].style.transform='rotate('+((si%5)-2)*3+'deg)';
   }}
