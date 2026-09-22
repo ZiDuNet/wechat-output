@@ -1,6 +1,6 @@
 ---
 name: wechat-group-export
-description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密钥破解）本地加密数据库提取密钥、解密，导出指定群聊/私聊为 Markdown，并解密导出图片/视频，以及从 VoiceInfo 表提取语音解码为 WAV。数据库密钥与图片密钥均从进程内存自动提取（图片密钥由登录态 code 派生，全自动，无需打开图片）。零第三方依赖；解压富文本消息需 zstandard（1.8MB wheel）。触发词：导出微信群聊、微信聊天记录、微信解密、群聊备份、私聊导出、微信图片导出、微信媒体导出、微信数据库。
+description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密钥破解）本地加密数据库提取密钥、解密，导出指定群聊/私聊为 Markdown，并解密导出图片/视频，以及从 VoiceInfo 表提取语音解码为 WAV。数据库密钥与图片密钥均从进程内存自动提取（图片密钥由登录态 code 派生，全自动，无需打开图片）。零第三方依赖；解压富文本消息需 zstandard（1.8MB wheel）。触发词：导出微信群聊、微信聊天记录、微信解密、群聊备份、私聊导出、微信图片导出、微信媒体导出、微信数据库、导出图片、导出视频、导出语音、视频导出、语音导出、聊天记录搜索、聊天记录统计、热词统计、数据库解密、发送者画像、HTML 聊天档案、媒体归档、多账号。
 ---
 
 # 微信聊天记录导出全流程（群聊 / 私聊 / 媒体，Windows / 微信 4.1.13 实测）
@@ -110,14 +110,20 @@ description: 从微信 Windows 4.x（实测 4.1.13.63，含新版 XOR 混淆密�
 | 模块 | 功能 | CLI |
 |---|---|---|
 | `wcdb_core.py` | 统一数据库访问层（pysqlcipher3 / sqlcipher CLI / 明文降级三后端） | `python wcdb_core.py info/query/scan` |
-| `search_fts5.py` | FTS5 全文搜索（比 LIKE 快 100x+） | `python search_fts5.py --query "关键词"` |
-| `cursor_fetch.py` | 游标分批拉取（大群不 OOM） | `python cursor_fetch.py --session "群名" --batch 500` |
+| `search_fts5.py` | 全文搜索：读微信自带 FTS 索引（LIKE 子串匹配，只读不建索引） | `python search_fts5.py --db-dir <db_storage> --keys <all_keys.json> --query "关键词"` |
+| `cursor_fetch.py` | 游标分批拉取（大群不 OOM，按会话 username 定位 Msg_<md5> 分表） | `python cursor_fetch.py --db-dir <db_storage> --key <密钥> --session <会话username> --batch 500` |
 | `contacts.py` | 联系人/群组查询（昵称/备注/成员/头像） | `python contacts.py contact/search/members/groups/stats` |
 | `hardlink.py` | 硬链接解析（图片/视频 md5 → 实际路径） | `python hardlink.py image/video/list-dbs` |
-| `db_health.py` | 数据库健康检查（完整性/分片/大小） | `python db_health.py --quick` |
-| `exec_query.py` | 通用 SQL 执行器（任意 SQL 查加密库） | `python exec_query.py query "SELECT ..."` |
-| `anti_revoke.py` | 消息反撤回（⚠️ 可选，修改数据库） | `python anti_revoke.py install/check/restore` |
-| `stats.py` | 统计分析（总览/会话/聚合） | `python stats.py overview/session/aggregate` |
+| `db_health.py` | 数据库健康检查（完整性/分片/大小）+ `--save/--diff/--watch` 定期巡检告警 | `python db_health.py --db-dir <db_storage> --key <密钥> --quick` / `--watch <快照.json> --interval 300` |
+| `exec_query.py` | 通用 SQL 执行器（任意 SQL 查加密库） | `python exec_query.py --db-dir <db_storage> --key <密钥> query "SELECT ..."` |
+| `anti_revoke.py` | 消息反撤回（⚠️ 可选，修改数据库，需 readonly=False）+ `watch` 实时自动恢复 | `python anti_revoke.py --db-dir <db_storage> --key <密钥> install/check/restore/watch` |
+| `stats.py` | 统计分析（总览/会话/聚合） | `python stats.py --db-dir <db_storage> --key <密钥> overview/session/aggregate` |
+| `keyword_stats.py` | 热词统计（按天/会话词频 → JSON/MD，读微信自带 FTS） | `python keyword_stats.py --db-dir <db_storage> --keys <all_keys.json> --days 30` |
+| `export_html.py` | HTML 聊天档案（离线可开，图片/视频素材进 assets/） | `python export_html.py --db-dir <db_storage> --keys <all_keys.json> --session <username> --out 聊天.html` |
+| `media_archive.py` | 媒体批量归档（图片/视频/语音 → out/<会话>/<类型>/） | `python media_archive.py --db-dir <db_storage> --keys <all_keys.json> --out <目录> --session <username>` |
+| `sender_profile.py` | 会话主理人画像（发送者TOP/时段/星期/类型） | `python sender_profile.py --db-dir <db_storage> --keys <all_keys.json> --session <username> --md` |
+| `wx_accounts.py` | 多账号识别与隔离（list/isolate keys） | `python wx_accounts.py --db-dir <xwechat_files> --keys <all_keys.json> list` |
+| `msg_reader.py` | 通用消息读取共享库（被上面模块复用，无 CLI） | `from msg_reader import MessageReader` |
 
 ### 用法示例
 
@@ -127,28 +133,47 @@ from wcdb_core import WcdbSession
 with WcdbSession(db_dir="db_storage", enc_key="64hex...") as db:
     rows = db.query("SELECT * FROM contact LIMIT 10")
 
-# FTS5 全文搜索
+# 全文搜索（读微信自带 FTS 索引；resolve_session 支持 群名/昵称/username）
 from search_fts5 import FtsSearcher
-with FtsSearcher("db_dir", enc_key="64hex...") as s:
-    results = s.search("关键词", session_id="xxx@chatroom")
+searcher = FtsSearcher("db_dir", enc_key="64hex...")   # 非上下文管理器，直接用
+results = searcher.search("关键词", session_id="xxx@chatroom", limit=20)
+for row in results["rows"]:
+    print(row)
 
-# 游标分批拉取
+# 游标分批拉取（session_id 是会话 username，而非显示群名）
 from cursor_fetch import MessageCursor
 with MessageCursor("db_dir", enc_key="64hex...", session_id="xxx@chatroom") as c:
     for batch in c.batches(batch_size=500):
         for msg in batch:
             process(msg)
 
-# 联系人查询
+# 联系人查询（非上下文管理器，直接用）
 from contacts import ContactManager
-with ContactManager("db_dir", enc_key="64hex...") as cm:
-    contact = cm.get_contact("wxid_xxx")
-    members = cm.get_group_members("xxx@chatroom")
+cm = ContactManager("db_dir", enc_key="64hex...")
+contact = cm.get_contact("wxid_xxx")
+members = cm.get_group_members("xxx@chatroom")
 
-# 数据库健康检查
+# 数据库健康检查（非上下文管理器，直接用）
 from db_health import DbHealthChecker
-with DbHealthChecker("db_dir", enc_key="64hex...") as checker:
-    report = checker.full_check()
+checker = DbHealthChecker("db_dir", enc_key="64hex...")
+report = checker.full_check()
+
+# 热词统计 / 会话画像 / HTML 档案 / 媒体归档（均只读）
+from keyword_stats import HotwordStats
+hw = HotwordStats("db_dir", enc_key="64hex...")
+print(hw.markdown(hw.stats(days=30)))
+
+from sender_profile import SenderProfiler
+prof = SenderProfiler("db_dir", enc_key="64hex...")
+print(prof.markdown(prof.profile("xxx@chatroom", top=10)))
+
+from export_html import HtmlExporter
+HtmlExporter("db_dir", enc_key="64hex...").export(
+    "out/群聊.html", session_id="xxx@chatroom", account_dir="<微信账号目录>")
+
+from media_archive import MediaArchiver
+print(MediaArchiver("db_dir", enc_key="64hex...").archive(
+    "out/媒体", session_id="xxx@chatroom"))
 ```
 
 ### 降级策略

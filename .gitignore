@@ -5,6 +5,9 @@ decrypted/
 all_keys.json
 *.db
 
+# 工具本地缓存 / 会话产物
+.opencode/
+
 # Python
 __pycache__/
 *.pyc

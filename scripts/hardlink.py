@@ -5,9 +5,9 @@
 
 用法:
     from hardlink import HardlinkResolver
-    with HardlinkResolver(db_dir, enc_key) as resolver:
-        path = resolver.resolve_image("abc123...", account_dir)
-        paths = resolver.resolve_video_batch(["md5_1", "md5_2"], db_path)
+    resolver = HardlinkResolver(db_dir, enc_key)
+    path = resolver.resolve_image("abc123...", account_dir)
+    paths = resolver.resolve_video_batch(["md5_1", "md5_2"], db_path)
 """
 from __future__ import annotations
 

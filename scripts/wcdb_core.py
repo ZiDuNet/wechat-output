@@ -173,23 +173,32 @@ class WcdbSession:
         self._conn.row_factory = sqlite3.Row
         return self._conn
 
+    def _using_cli(self) -> bool:
+        return bool(getattr(self, "_cli_db_path", None))
+
     def query(self, sql: str, params: tuple = ()) -> list[dict]:
-        """执行查询，返回字典列表"""
-        if self._cli_db_path if hasattr(self, '_cli_db_path') else None:
+        """执行查询，返回字典列表
+
+        CLI 后端无参数绑定，仅支持 str/int/float 参数内联，含引号或 SQL 字面量内 `?` 的查询请直接拼 SQL。
+        """
+        if self._using_cli():
             return self._query_cli(sql, params)
         rows = self._conn.execute(sql, params).fetchall()
         return [dict(r) for r in rows]
 
     def execute(self, sql: str, params: tuple = ()) -> int:
-        """执行写操作，返回影响行数"""
-        if self._cli_db_path if hasattr(self, '_cli_db_path') else None:
+        """执行写操作，返回影响行数（readonly 模式禁止写）"""
+        if self._using_cli():
             return self._execute_cli(sql, params)
         cur = self._conn.execute(sql, params)
         self._conn.commit()
         return cur.rowcount
 
     def executescript(self, script: str):
-        """执行多条 SQL"""
+        """执行多条 SQL（readonly 模式禁止写）"""
+        if self._using_cli():
+            self._execute_cli(script, ())
+            return
         self._conn.executescript(script)
 
     def _query_cli(self, sql: str, params: tuple) -> list[dict]:
@@ -230,10 +239,15 @@ class WcdbSession:
             data = json.loads(json_str)
             return data if isinstance(data, list) else [data]
         except json.JSONDecodeError:
+            # 无结果集时 CLI 只输出 "ok"（无 [ 或 {）：是空结果，不是 [{"result":"ok"}]
+            if not any(ch in r.stdout for ch in "[{"):
+                return []
             return [{"result": r.stdout.strip()}]
 
     def _execute_cli(self, sql: str, params: tuple) -> int:
-        """通过 sqlcipher CLI 执行写操作"""
+        """通过 sqlcipher CLI 执行写操作（无参数绑定，仅支持 str/int/float 内联）"""
+        if self._readonly:
+            raise RuntimeError("WcdbSession(readonly=True) 禁止写操作，请传 readonly=False")
         formatted_sql = sql
         for i, p in enumerate(params):
             if isinstance(p, str):
@@ -281,9 +295,9 @@ def name2id_col(db) -> str | None:
 
 
 def find_session_table(db, session_id: str) -> str | None:
-    """按会话名定位消息表。
+    """按会话 username 定位消息表（与主链 export_group_md 一致：Msg_<md5(username)>）。
 
-    优先按主链 export_group_md 的规律：Msg_<md5(会话名)>；
+    注意 session_id 是会话 username/wxid，不是显示群名；
     表名不是 md5 命名时（测试库/旧库），遍历 Msg 表用 name2id 反查兜底。
     """
     import hashlib

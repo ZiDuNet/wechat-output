@@ -11,7 +11,7 @@
                 process(msg)
 
     # CLI
-    python cursor_fetch.py --db-dir ... --key ... --session "群名" --batch 500
+    python cursor_fetch.py --db-dir ... --key ... --session <会话username> --batch 500
 """
 from __future__ import annotations
 

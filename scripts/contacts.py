@@ -218,12 +218,19 @@ class GroupManager:
         if not key:
             return {}
         with WcdbSession(db_path=contact_db, enc_key=key) as db:
+            rooms = db.query(
+                "SELECT rowid FROM name2id WHERE username = ?",
+                (chatroom_id,)
+            )
+            if not rooms:
+                return {}
+            room_id = rooms[0]["rowid"]
             rows = db.query(
                 "SELECT n.username, c.display_name "
                 "FROM chatroom_member c "
                 "JOIN name2id n ON c.member_id = n.rowid "
                 "WHERE c.room_id = ?",
-                (chatroom_id,)
+                (room_id,)
             )
             return {r["username"]: r["display_name"] or r["username"] for r in rows}
 

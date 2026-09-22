@@ -143,8 +143,8 @@ python search_fts5.py --db-dir <db_storage> --keys <all_keys.json> --query "关�
 python search_fts5.py --db-dir <db_storage> --keys <all_keys.json> --query "关键词" --session "群名/昵称/username" --limit 20
 python search_fts5.py --db-dir <db_storage> --keys <all_keys.json> --query "关键词" --ensure-index   # 仅检查微信自带 FTS 是否存在
 
-# 游标分批拉取大群消息（不 OOM）
-python cursor_fetch.py --db-dir <db_storage> --key <密钥> --session "群名" --batch 500
+# 游标分批拉取大群消息（不 OOM；--session 传会话 username/wxid，表格按 Msg_<md5(username)> 定位）
+python cursor_fetch.py --db-dir <db_storage> --key <密钥> --session <会话username> --batch 500
 
 # 联系人查询
 python contacts.py contact <username> --db-dir <db_storage> --key <密钥>
@@ -173,6 +173,34 @@ python exec_query.py --db-dir <db_storage> --key <密钥> search "message"
 # 反撤回（⚠️ 可选，会修改数据库，建议先备份）
 python anti_revoke.py --db-dir <db_storage> --key <密钥> install --session <session_id>
 python anti_revoke.py --db-dir <db_storage> --key <密钥> check
+
+# 实时监听并自动恢复撤回消息（需先 install；--state 续跑，Ctrl+C 退出）
+python anti_revoke.py --db-dir <db_storage> --key <密钥> watch --interval 2 --state 撤回.watermark.json
+
+# 热词统计（最近 30 天，按天分桶；--out 输出 Markdown）
+python keyword_stats.py --db-dir <db_storage> --keys <all_keys.json> --days 30 --top 20
+python keyword_stats.py --db-dir <db_storage> --keys <all_keys.json> --session <群名/昵称/username> --out 热词.md
+
+# HTML 聊天档案（离线可开；图片/视频素材复制到同名 assets/ 子目录）
+python export_html.py --db-dir <db_storage> --keys <all_keys.json> --session <会话username> \
+    --out "D:/档案/某个群聊.html" --account-dir "<微信账号目录>"
+
+# 媒体批量归档（图片/视频/语音）
+python media_archive.py --db-dir <db_storage> --keys <all_keys.json> --session <会话username> \
+    --out "D:/媒体归档" --account-dir "<微信账号目录>"
+
+# 会话主理人画像（发送者 TOP / 时段 / 星期 / 消息类型）
+python sender_profile.py --db-dir <db_storage> --keys <all_keys.json> --session <会话username> --md
+
+# 多账号识别与隔离（先 list 看有哪些账号，再 isolate 出单账号 keys）
+python wx_accounts.py --db-dir "<xwechat_files>" --keys all_keys.json list
+python wx_accounts.py --db-dir "<xwechat_files>" --keys all_keys.json isolate \
+    --account <账号目录名> --out keys_账号A.json
+
+# 数据库定期巡检（先存基线快照，之后每次 --diff 报变化；--watch 循环告警）
+python db_health.py --db-dir <db_storage> --key <密钥> --save health.json
+python db_health.py --db-dir <db_storage> --key <密钥> --diff health.json
+python db_health.py --db-dir <db_storage> --key <密钥> --watch health.json --interval 300
 ```
 
 ## 只读实时消息监听（v2.6，watch_messages.py）
@@ -229,10 +257,16 @@ wechat-group-export/
 │   ├── cursor_fetch.py          # 【v3.0】游标分批拉取（大群不 OOM）
 │   ├── contacts.py              # 【v3.0】联系人/群组查询（昵称/备注/成员/头像）
 │   ├── hardlink.py              # 【v3.0】硬链接解析（图片/视频 md5 → 实际路径）
-│   ├── db_health.py             # 【v3.0】数据库健康检查（完整性/分片/大小）
+│   ├── db_health.py             # 【v3.0】数据库健康检查 + 定期巡检（--save/--diff/--watch）
 │   ├── exec_query.py            # 【v3.0】通用 SQL 执行器（任意 SQL 查加密库）
-│   ├── anti_revoke.py           # 【v3.0·可选】消息反撤回（⚠️ 会修改数据库）
+│   ├── anti_revoke.py           # 【v3.0·可选】消息反撤回（⚠️ 会修改数据库）+ watch 实时恢复
 │   ├── stats.py                 # 【v3.0·可选】统计分析（总览/会话/聚合）
+│   ├── msg_reader.py            # 【v3.0】通用消息读取共享库（只读，被下面模块复用）
+│   ├── keyword_stats.py         # 【v3.0】热词统计（按天/会话词频 → JSON/MD，读微信自带 FTS）
+│   ├── export_html.py           # 【v3.0】HTML 聊天档案（离线可开，媒体入 assets/）
+│   ├── media_archive.py         # 【v3.0】媒体批量归档（图片/视频/语音 → out/<会话>/<类型>/）
+│   ├── sender_profile.py        # 【v3.0】会话主理人画像（发送者TOP/时段/星期/类型）
+│   ├── wx_accounts.py           # 【v3.0】多账号识别与隔离（list/isolate keys）
 │   ├── cnb_push.sh              # 推本仓到 CNB（自动注入正确 token + 绕开失效代理）
 │   └── wcdb_key_tool_windows.py # 密钥校验/解密函数（源自 TANGandXue/wcdb-key-tool，MIT）
 └── LICENSE

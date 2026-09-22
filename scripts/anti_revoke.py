@@ -7,12 +7,13 @@
 
 用法:
     from anti_revoke import AntiRevokeManager
-    with AntiRevokeManager(db_dir, enc_key) as arm:
-        arm.install(session_id="xxx@chatroom")
-        arm.check(session_id="xxx@chatroom")
+    arm = AntiRevokeManager(db_dir, enc_key)
+    arm.install(session_id="xxx@chatroom")
+    arm.check(session_id="xxx@chatroom")
 
     # CLI
     python anti_revoke.py --db-dir ... --key ... install --session "xxx@chatroom"
+    python anti_revoke.py --db-dir ... --key ... watch --interval 2
 """
 from __future__ import annotations
 
@@ -20,41 +21,18 @@ import argparse
 import json
 import os
 import sys
+import time
+from datetime import datetime
 
 from wcdb_core import WcdbSession, load_keys, get_db_key_for_file
 
 
-# 反撤回缓存表 DDL
-CACHE_TABLE_SQL = """
-CREATE TABLE IF NOT EXISTS _weflow_anti_revoke_deleted_cache (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    tbl TEXT NOT NULL,
-    local_id INTEGER,
-    server_id INTEGER,
-    local_type INTEGER,
-    sort_seq INTEGER,
-    real_sender_id INTEGER,
-    create_time INTEGER,
-    status INTEGER,
-    upload_status INTEGER,
-    download_status INTEGER,
-    server_seq INTEGER,
-    origin_source INTEGER,
-    source TEXT,
-    message_content TEXT,
-    compress_content TEXT,
-    packed_info_data BLOB,
-    WCDB_CT_message_content INTEGER,
-    WCDB_CT_source INTEGER,
-    deleted_at INTEGER
-)
-"""
-
+# 反撤回 pending 表 DDL（缓存表结构随消息表列动态生成，见 _cache_ddl）
 PENDING_TABLE_SQL = """
 CREATE TABLE IF NOT EXISTS _weflow_anti_revoke_pending (
     session_id TEXT PRIMARY KEY,
     updated_at INTEGER
-)
+);
 """
 
 
@@ -87,6 +65,26 @@ class AntiRevokeManager:
         )
         return tables[0]["name"] if tables else None
 
+    def _msg_columns(self, db: WcdbSession, table: str) -> list[str]:
+        """消息表实际列名（随版本自适应，避免硬编码列清单漂移）"""
+        cols = [c["name"] for c in db.query(f"PRAGMA table_info({table})")]
+        return cols
+
+    def _cache_column_names(self, cols: list[str]) -> list[str]:
+        return [c for c in cols if c.lower() not in ("local_id", "server_id")]
+
+    def _cache_ddl(self, cols: list[str]) -> str:
+        """据消息表真实列动态生成缓存表 DDL"""
+        body = ",\n".join(f"    {c} TEXT" for c in cols)
+        return f"""
+CREATE TABLE IF NOT EXISTS _weflow_anti_revoke_deleted_cache (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    tbl TEXT NOT NULL,
+    deleted_at INTEGER,
+{body}
+);
+"""
+
     def install(self, session_id: str | None = None) -> dict:
         """安装反撤回 trigger"""
         results = {"installed": 0, "skipped": 0, "errors": []}
@@ -95,14 +93,17 @@ class AntiRevokeManager:
             if not key:
                 continue
             try:
-                with WcdbSession(db_path=db_path, enc_key=key) as db:
-                    # 创建缓存表
-                    db.executescript(CACHE_TABLE_SQL + PENDING_TABLE_SQL)
+                with WcdbSession(db_path=db_path, enc_key=key, readonly=False) as db:
+                    db.executescript(PENDING_TABLE_SQL)
 
                     table = self._find_message_table(db)
                     if not table:
                         results["skipped"] += 1
                         continue
+
+                    # 依据消息表真实列动态建缓存表（版本自适应）
+                    cols = self._msg_columns(db, table)
+                    db.execute(self._cache_ddl(cols))
 
                     trigger_name = f"_weflow_anti_revoke_{table}"
 
@@ -115,25 +116,17 @@ class AntiRevokeManager:
                         results["skipped"] += 1
                         continue
 
-                    # 安装 trigger
+                    # 安装 trigger（动态列，避免硬编码列清单随版本漂移）
+                    colnames = ", ".join(cols)
+                    old_cols = ", ".join(f"OLD.{c}" for c in cols)
+                    cond = "WHERE OLD.local_type != 10002" if "local_type" in cols else ""
                     trigger_sql = f"""
                     CREATE TRIGGER IF NOT EXISTS {trigger_name}
                     AFTER DELETE ON {table}
                     BEGIN
-                        INSERT INTO _weflow_anti_revoke_deleted_cache
-                        (tbl, local_id, server_id, local_type, sort_seq, real_sender_id,
-                         create_time, status, upload_status, download_status, server_seq,
-                         origin_source, source, message_content, compress_content,
-                         packed_info_data, WCDB_CT_message_content, WCDB_CT_source, deleted_at)
-                        SELECT
-                            '{table}', OLD.local_id, OLD.server_id, OLD.local_type,
-                            OLD.sort_seq, OLD.real_sender_id, OLD.create_time,
-                            OLD.status, OLD.upload_status, OLD.download_status,
-                            OLD.server_seq, OLD.origin_source, OLD.source,
-                            OLD.message_content, OLD.compress_content,
-                            OLD.packed_info_data, OLD.WCDB_CT_message_content,
-                            OLD.WCDB_CT_source, strftime('%s', 'now')
-                        WHERE OLD.local_type != 10002;
+                        INSERT INTO _weflow_anti_revoke_deleted_cache (tbl, deleted_at, {colnames})
+                        SELECT '{table}', strftime('%s', 'now'), {old_cols}
+                        {cond};
                     END
                     """
                     db.execute(trigger_sql)
@@ -151,7 +144,7 @@ class AntiRevokeManager:
             if not key:
                 continue
             try:
-                with WcdbSession(db_path=db_path, enc_key=key) as db:
+                with WcdbSession(db_path=db_path, enc_key=key, readonly=False) as db:
                     triggers = db.query(
                         "SELECT name FROM sqlite_master WHERE type='trigger' "
                         "AND name LIKE '_weflow_anti_revoke_%'"
@@ -198,6 +191,37 @@ class AntiRevokeManager:
 
         return results
 
+    def _restore_one(self, db_path: str, key: str) -> dict:
+        """恢复单个消息库的撤回缓存（供 restore/watch 复用，列清单动态对齐表结构）"""
+        results = {"restored": 0, "errors": []}
+        with WcdbSession(db_path=db_path, enc_key=key, readonly=False) as db:
+            table = self._find_message_table(db)
+            if not table:
+                return results
+            cols = self._msg_columns(db, table)
+            colnames = ", ".join(cols)
+            placeholders = ", ".join("?" for _ in cols)
+            cached = db.query(
+                "SELECT * FROM _weflow_anti_revoke_deleted_cache WHERE tbl = ?",
+                (table,)
+            )
+            for msg in cached:
+                try:
+                    vals = [msg.get(c) for c in cols]
+                    db.execute(
+                        f"INSERT OR IGNORE INTO {table} ({colnames}) VALUES ({placeholders})",
+                        vals,
+                    )
+                    results["restored"] += 1
+                except Exception as e:
+                    results["errors"].append(str(e))
+
+            db.execute(
+                "DELETE FROM _weflow_anti_revoke_deleted_cache WHERE tbl = ?",
+                (table,)
+            )
+        return results
+
     def restore(self, session_id: str | None = None) -> dict:
         """恢复被撤回的消息"""
         results = {"restored": 0, "errors": []}
@@ -206,50 +230,78 @@ class AntiRevokeManager:
             if not key:
                 continue
             try:
-                with WcdbSession(db_path=db_path, enc_key=key) as db:
-                    table = self._find_message_table(db)
-                    if not table:
-                        continue
-
-                    # 获取缓存的消息
-                    cached = db.query(
-                        "SELECT * FROM _weflow_anti_revoke_deleted_cache WHERE tbl = ?",
-                        (table,)
-                    )
-
-                    for msg in cached:
-                        try:
-                            # 插入回原表
-                            db.execute(f"""
-                                INSERT OR IGNORE INTO {table}
-                                (server_id, local_type, sort_seq, real_sender_id, create_time,
-                                 status, upload_status, download_status, server_seq,
-                                 origin_source, source, message_content, compress_content,
-                                 packed_info_data, WCDB_CT_message_content, WCDB_CT_source)
-                                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                            """, (
-                                msg.get("server_id"), msg.get("local_type"),
-                                msg.get("sort_seq"), msg.get("real_sender_id"),
-                                msg.get("create_time"), msg.get("status"),
-                                msg.get("upload_status"), msg.get("download_status"),
-                                msg.get("server_seq"), msg.get("origin_source"),
-                                msg.get("source"), msg.get("message_content"),
-                                msg.get("compress_content"), msg.get("packed_info_data"),
-                                msg.get("WCDB_CT_message_content"), msg.get("WCDB_CT_source"),
-                            ))
-                            results["restored"] += 1
-                        except Exception as e:
-                            results["errors"].append(str(e))
-
-                    # 清理缓存
-                    db.execute(
-                        "DELETE FROM _weflow_anti_revoke_deleted_cache WHERE tbl = ?",
-                        (table,)
-                    )
+                r = self._restore_one(db_path, key)
+                results["restored"] += r["restored"]
+                results["errors"].extend(r["errors"])
             except Exception as e:
                 results["errors"].append(f"{db_path}: {e}")
 
         return results
+
+    def watch(self, interval: float = 2.0, once: bool = False,
+              state_file: str | None = None,
+              max_events: int | None = None) -> dict:
+        """实时监听 + 自动恢复撤回消息。
+
+        基于 deleted_at 水位增量处理；--state 保存水位，重启续跑。
+        需要先 install() 安装 trigger。返回事件列表。
+        """
+        state: dict[str, int] = {}
+        if state_file and os.path.exists(state_file):
+            with open(state_file, "r", encoding="utf-8") as f:
+                try:
+                    state = json.load(f)
+                except Exception:
+                    state = {}
+
+        events: list[dict] = []
+        restored_total = 0
+        ticks = 0
+        try:
+            while max_events is None or ticks < max_events:
+                ticks += 1
+                for db_path in self._find_message_dbs():
+                    key = self._get_key(db_path)
+                    if not key:
+                        continue
+                    wm = state.get(db_path, 0)
+                    try:
+                        with WcdbSession(db_path=db_path, enc_key=key) as db:
+                            rows = db.query(
+                                "SELECT COUNT(*) AS c, MAX(deleted_at) AS m "
+                                "FROM _weflow_anti_revoke_deleted_cache "
+                                "WHERE deleted_at > ?",
+                                (wm,)
+                            )
+                        if rows and rows[0]["c"]:
+                            r = self._restore_one(db_path, key)
+                            newm = rows[0]["m"] or wm
+                            state[db_path] = max(int(wm), int(newm))
+                            restored_total += r["restored"]
+                            events.append({
+                                "db": db_path,
+                                "time": datetime.now().isoformat(),
+                                "restored": r["restored"],
+                                "errors": r["errors"],
+                            })
+                            print(f"[{datetime.now():%H:%M:%S}] 恢复 {r['restored']} 条撤回: "
+                                  f"{db_path}", file=sys.stderr)
+                    except Exception as e:
+                        events.append({"db": db_path,
+                                       "time": datetime.now().isoformat(),
+                                       "error": str(e)})
+                if once:
+                    break
+                time.sleep(interval)
+        except KeyboardInterrupt:
+            pass
+        finally:
+            if state_file:
+                with open(state_file, "w", encoding="utf-8") as f:
+                    json.dump(state, f, ensure_ascii=False, indent=2)
+
+        return {"events": events, "restored": restored_total, "ticks": ticks,
+                "state": state}
 
 
 def main():
@@ -273,6 +325,13 @@ def main():
     r_p = sub.add_parser("restore", help="恢复被撤回的消息")
     r_p.add_argument("--session", help="限定会话")
 
+    # watch
+    w_p = sub.add_parser("watch", help="实时监听并自动恢复撤回消息（需先 install）")
+    w_p.add_argument("--interval", type=float, default=2.0, help="轮询间隔秒数")
+    w_p.add_argument("--once", action="store_true", help="只跑一轮")
+    w_p.add_argument("--state", help="水位文件路径（断电续跑）")
+    w_p.add_argument("--max-events", type=int, help="最多处理事件批次数后退出")
+
     args = ap.parse_args()
 
     arm = AntiRevokeManager(args.db_dir, args.key, getattr(args, 'keys', None))
@@ -288,6 +347,10 @@ def main():
         print(json.dumps(results, ensure_ascii=False, indent=2))
     elif args.cmd == "restore":
         results = arm.restore(args.session)
+        print(json.dumps(results, ensure_ascii=False, indent=2))
+    elif args.cmd == "watch":
+        results = arm.watch(interval=args.interval, once=args.once,
+                            state_file=args.state, max_events=args.max_events)
         print(json.dumps(results, ensure_ascii=False, indent=2))
     else:
         ap.print_help()
