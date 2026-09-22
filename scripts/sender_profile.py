@@ -22,7 +22,7 @@ import json
 import os
 import sys
 from collections import Counter, defaultdict
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from msg_reader import MessageReader, LOCAL_TYPE_LABEL
 from search_fts5 import FtsSearcher
@@ -139,7 +139,7 @@ def main():
         begin_ts = int(datetime.strptime(args.begin, "%Y-%m-%d").timestamp())
     if args.end:
         end_ts = int((datetime.strptime(args.end, "%Y-%m-%d")
-                      + datetime.timedelta(days=1)).timestamp())
+                      + timedelta(days=1)).timestamp())
 
     prof = SenderProfiler(args.db_dir, args.key, args.keys)
     result = prof.profile(args.session, top=args.top, begin_ts=begin_ts, end_ts=end_ts)
